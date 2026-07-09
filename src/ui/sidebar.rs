@@ -15,12 +15,13 @@ pub fn show(
     browser: &mut BrowserState,
     address_input: &mut String,
     theme: &Theme,
+    sidebar_collapsed: &mut bool,
 ) -> bool {
     let space = &theme.tokens.primitive.space;
     let color = &theme.tokens.semantic.color;
     let mut toggle_theme = false;
 
-    toolbar::show_compact(ui, browser, address_input, theme);
+    toolbar::show_compact(ui, browser, address_input, theme, sidebar_collapsed);
 
     ui.add_space(space.lg);
     highlighted_pinned_tabs(ui, browser, address_input, theme);

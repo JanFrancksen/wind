@@ -13,6 +13,7 @@ pub fn show_compact(
     browser: &mut BrowserState,
     address_input: &mut String,
     theme: &Theme,
+    sidebar_collapsed: &mut bool,
 ) {
     handle_shortcuts(ui, browser, address_input);
 
@@ -52,6 +53,17 @@ pub fn show_compact(
             .clicked()
         {
             browser.reload();
+        }
+
+        if DsButton::icon(Icon::ArrowLeft)
+            .ghost()
+            .small()
+            .width(control)
+            .show(ui, theme)
+            .on_hover_text("Collapse sidebar (Cmd+S)")
+            .clicked()
+        {
+            *sidebar_collapsed = true;
         }
     });
 

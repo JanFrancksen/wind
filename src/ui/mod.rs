@@ -15,91 +15,167 @@ pub fn show_root(
     address_input: &mut String,
     theme: &mut Theme,
     sidebar_width: &mut f32,
+    sidebar_collapsed: &mut bool,
 ) {
     let available = ui.available_size();
     let full_rect = ui.max_rect();
     paint_app_backdrop(ui, full_rect, theme);
+    handle_sidebar_shortcut(ui, sidebar_collapsed);
 
     let resize_handle_width = 8.0;
     let min_sidebar_width = 224.0;
     let min_content_width = 320.0;
-    let max_sidebar_width = (available.x - min_content_width - resize_handle_width)
+    let max_sidebar_width = (available.x - min_content_width)
         .max(min_sidebar_width)
         .min(available.x * 0.68);
     *sidebar_width = sidebar_width.clamp(min_sidebar_width, max_sidebar_width);
-    let content_width = (available.x - *sidebar_width - resize_handle_width).max(0.0);
+    let sidebar_progress = ui.ctx().animate_bool_with_time_and_easing(
+        egui::Id::new("wind_sidebar_expanded"),
+        !*sidebar_collapsed,
+        theme.tokens.primitive.motion.sidebar_collapse_seconds,
+        egui::emath::easing::cubic_out,
+    );
+    let sidebar_width_for_layout = *sidebar_width * sidebar_progress;
+    let sidebar_rect = egui::Rect::from_min_size(
+        full_rect.min,
+        egui::vec2(sidebar_width_for_layout, available.y),
+    );
+    let content_rect = egui::Rect::from_min_max(
+        egui::pos2(sidebar_rect.right(), full_rect.top()),
+        full_rect.right_bottom(),
+    );
 
-    ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-    ui.horizontal(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(*sidebar_width, available.y),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                Surface::sidebar(theme).show(ui, |ui| {
-                    ui.set_min_size(egui::vec2(*sidebar_width, available.y));
-                    ui.set_max_width(*sidebar_width);
-                    if sidebar::show(ui, browser, address_input, theme) {
-                        *theme = theme.toggled();
-                    }
-                });
+    if sidebar_width_for_layout > 0.5 {
+        show_animated_sidebar(
+            ui,
+            browser,
+            address_input,
+            theme,
+            sidebar_collapsed,
+            SidebarAnimation {
+                expanded_width: *sidebar_width,
+                layout_width: sidebar_width_for_layout,
+                height: available.y,
+                progress: sidebar_progress,
             },
         );
+    }
 
-        sidebar_resize_handle(
+    show_content_surface(ui, frame, browser, renderer, theme, content_rect);
+
+    if sidebar_progress > 0.98 {
+        invisible_sidebar_resize_handle(
             ui,
+            sidebar_rect.right(),
+            full_rect.top(),
             sidebar_width,
             min_sidebar_width,
             max_sidebar_width,
             resize_handle_width,
             available.y,
-            theme,
         );
+    }
+}
 
-        ui.allocate_ui_with_layout(
-            egui::vec2(content_width, available.y),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.set_min_size(egui::vec2(content_width, available.y));
-                show_browser_surface(ui, frame, browser, renderer, theme);
-            },
-        );
+#[derive(Clone, Copy)]
+struct SidebarAnimation {
+    expanded_width: f32,
+    layout_width: f32,
+    height: f32,
+    progress: f32,
+}
+
+fn show_animated_sidebar(
+    ui: &mut egui::Ui,
+    browser: &mut BrowserState,
+    address_input: &mut String,
+    theme: &mut Theme,
+    sidebar_collapsed: &mut bool,
+    animation: SidebarAnimation,
+) {
+    let clip_rect = egui::Rect::from_min_size(
+        ui.max_rect().min,
+        egui::vec2(animation.layout_width, animation.height),
+    );
+    let slide_offset = -(1.0 - animation.progress) * theme.tokens.primitive.space.lg;
+    let content_rect = egui::Rect::from_min_size(
+        egui::pos2(clip_rect.left() + slide_offset, clip_rect.top()),
+        egui::vec2(animation.expanded_width, animation.height),
+    );
+
+    let mut sidebar_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(content_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    sidebar_ui.set_clip_rect(clip_rect);
+    sidebar_ui.set_opacity(animation.progress.clamp(0.0, 1.0));
+    Surface::sidebar(theme).show(&mut sidebar_ui, |ui| {
+        ui.set_min_size(egui::vec2(animation.expanded_width, animation.height));
+        ui.set_max_width(animation.expanded_width);
+        if sidebar::show(ui, browser, address_input, theme, sidebar_collapsed) {
+            *theme = theme.toggled();
+        }
     });
 }
 
-fn sidebar_resize_handle(
+fn show_content_surface(
     ui: &mut egui::Ui,
+    frame: &mut eframe::Frame,
+    browser: &mut BrowserState,
+    renderer: &mut BrowserRenderer,
+    theme: &Theme,
+    rect: egui::Rect,
+) {
+    let mut content_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    content_ui.set_clip_rect(rect);
+    content_ui.set_min_size(rect.size());
+    show_browser_surface(&mut content_ui, frame, browser, renderer, theme);
+}
+
+fn handle_sidebar_shortcut(ui: &mut egui::Ui, sidebar_collapsed: &mut bool) {
+    let toggle_sidebar = ui.input(|input| {
+        input.modifiers.command
+            && !input.modifiers.shift
+            && !input.modifiers.alt
+            && input.key_pressed(egui::Key::S)
+    });
+
+    if toggle_sidebar {
+        *sidebar_collapsed = !*sidebar_collapsed;
+    }
+}
+
+fn invisible_sidebar_resize_handle(
+    ui: &mut egui::Ui,
+    center_x: f32,
+    top: f32,
     sidebar_width: &mut f32,
     min_width: f32,
     max_width: f32,
     handle_width: f32,
     height: f32,
-    theme: &Theme,
 ) {
-    let (rect, response) = ui.allocate_exact_size(
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(center_x, top + height / 2.0),
         egui::vec2(handle_width, height),
-        egui::Sense::click_and_drag(),
     );
-    let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    let response = ui
+        .interact(
+            rect,
+            egui::Id::new("wind_sidebar_resize_handle"),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
 
     if response.dragged() {
         let delta = ui.input(|input| input.pointer.delta().x);
         *sidebar_width = (*sidebar_width + delta).clamp(min_width, max_width);
         ui.ctx().request_repaint();
-    }
-
-    if response.hovered() || response.dragged() {
-        let color = if response.dragged() {
-            theme.tokens.semantic.color.accent
-        } else {
-            theme.tokens.semantic.color.border
-        };
-        ui.painter().line_segment(
-            [
-                egui::pos2(rect.center().x, rect.top()),
-                egui::pos2(rect.center().x, rect.bottom()),
-            ],
-            egui::Stroke::new(theme.tokens.primitive.stroke.thin, color),
-        );
     }
 }
 

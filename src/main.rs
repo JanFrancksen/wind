@@ -15,6 +15,7 @@ struct BrowserApp {
     address_input: String,
     theme: Theme,
     sidebar_width: f32,
+    sidebar_collapsed: bool,
 }
 
 impl Default for BrowserApp {
@@ -41,6 +42,7 @@ impl BrowserApp {
             address_input,
             theme,
             sidebar_width,
+            sidebar_collapsed: false,
         }
     }
 }
@@ -60,6 +62,7 @@ impl eframe::App for BrowserApp {
             &mut self.address_input,
             &mut self.theme,
             &mut self.sidebar_width,
+            &mut self.sidebar_collapsed,
         );
     }
 

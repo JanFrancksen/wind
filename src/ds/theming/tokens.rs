@@ -17,6 +17,7 @@ pub struct PrimitiveTokens {
     pub stroke: StrokeTokens,
     pub typography: TypographyTokens,
     pub size: SizeTokens,
+    pub motion: MotionTokens,
 }
 
 #[derive(Clone)]
@@ -84,6 +85,11 @@ pub struct SizeTokens {
     pub sidebar_width: f32,
     pub app_padding: f32,
     pub tile: f32,
+}
+
+#[derive(Clone)]
+pub struct MotionTokens {
+    pub sidebar_collapse_seconds: f32,
 }
 
 #[derive(Clone)]

@@ -1,9 +1,9 @@
 use eframe::egui;
 
 use super::tokens::{
-    ButtonTokens, ColorPrimitives, ComponentTokens, InputTokens, PrimitiveTokens, RadiusTokens,
-    SemanticColors, SemanticTokens, SizeTokens, SpaceTokens, StrokeTokens, TabTokens, Tokens,
-    TypographyTokens,
+    ButtonTokens, ColorPrimitives, ComponentTokens, InputTokens, MotionTokens, PrimitiveTokens,
+    RadiusTokens, SemanticColors, SemanticTokens, SizeTokens, SpaceTokens, StrokeTokens, TabTokens,
+    Tokens, TypographyTokens,
 };
 
 #[derive(Clone)]
@@ -102,6 +102,10 @@ impl Theme {
             tile: 64.0,
         };
 
+        let motion = MotionTokens {
+            sidebar_collapse_seconds: 0.26,
+        };
+
         let semantic = SemanticTokens {
             color: SemanticColors {
                 app_background: color.sky_100,
@@ -162,6 +166,7 @@ impl Theme {
                     stroke,
                     typography,
                     size,
+                    motion,
                 },
                 semantic,
                 component,
