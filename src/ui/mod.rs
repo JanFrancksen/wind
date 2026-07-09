@@ -33,7 +33,7 @@ pub fn show_root(
         egui::Id::new("wind_sidebar_expanded"),
         !*sidebar_collapsed,
         theme.tokens.primitive.motion.sidebar_collapse_seconds,
-        egui::emath::easing::cubic_out,
+        egui::emath::easing::sin_in_out,
     );
     let sidebar_width_for_layout = *sidebar_width * sidebar_progress;
     let sidebar_rect = egui::Rect::from_min_size(
@@ -53,10 +53,8 @@ pub fn show_root(
             theme,
             sidebar_collapsed,
             SidebarAnimation {
-                expanded_width: *sidebar_width,
                 layout_width: sidebar_width_for_layout,
                 height: available.y,
-                progress: sidebar_progress,
             },
         );
     }
@@ -79,10 +77,8 @@ pub fn show_root(
 
 #[derive(Clone, Copy)]
 struct SidebarAnimation {
-    expanded_width: f32,
     layout_width: f32,
     height: f32,
-    progress: f32,
 }
 
 fn show_animated_sidebar(
@@ -97,10 +93,9 @@ fn show_animated_sidebar(
         ui.max_rect().min,
         egui::vec2(animation.layout_width, animation.height),
     );
-    let slide_offset = -(1.0 - animation.progress) * theme.tokens.primitive.space.lg;
     let content_rect = egui::Rect::from_min_size(
-        egui::pos2(clip_rect.left() + slide_offset, clip_rect.top()),
-        egui::vec2(animation.expanded_width, animation.height),
+        clip_rect.min,
+        egui::vec2(animation.layout_width, animation.height),
     );
 
     let mut sidebar_ui = ui.new_child(
@@ -109,10 +104,12 @@ fn show_animated_sidebar(
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
     sidebar_ui.set_clip_rect(clip_rect);
-    sidebar_ui.set_opacity(animation.progress.clamp(0.0, 1.0));
     Surface::sidebar(theme).show(&mut sidebar_ui, |ui| {
-        ui.set_min_size(egui::vec2(animation.expanded_width, animation.height));
-        ui.set_max_width(animation.expanded_width);
+        // The surface adds horizontal inner margins. Let it determine the inner
+        // width from its outer rect; forcing the full sidebar width here made the
+        // children overflow into those margins and get clipped at the right edge.
+        let vertical_margin = theme.tokens.primitive.space.lg * 2.0;
+        ui.set_min_height((animation.height - vertical_margin).max(0.0));
         if sidebar::show(ui, browser, address_input, theme, sidebar_collapsed) {
             *theme = theme.toggled();
         }

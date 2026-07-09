@@ -37,7 +37,8 @@ impl<'a> TabButton<'a> {
             egui::Color32::TRANSPARENT
         };
 
-        ui.add(
+        ui.add_sized(
+            egui::vec2(width.max(tab.height), tab.height),
             egui::Button::new(
                 egui::RichText::new(self.title)
                     .color(color.text)

@@ -36,6 +36,9 @@ impl<'a> TextField<'a> {
             ui.available_width()
         }
         .max(input.height);
+        let horizontal_chrome =
+            (input.padding_x * 2.0) + (theme.tokens.primitive.stroke.hairline * 2.0);
+        let editor_width = (desired_width - horizontal_chrome).max(0.0);
 
         let inner = egui::Frame::new()
             .fill(color.surface)
@@ -56,7 +59,10 @@ impl<'a> TextField<'a> {
                     text_edit = text_edit.hint_text(placeholder);
                 }
 
-                ui.add_sized(egui::vec2(desired_width, input.height), text_edit)
+                // `desired_width` describes the outer control. The editor lives
+                // inside the frame's padding and border, so it must receive the
+                // remaining width rather than the entire outer width.
+                ui.add_sized(egui::vec2(editor_width, input.height), text_edit)
             });
 
         inner.inner

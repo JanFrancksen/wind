@@ -235,78 +235,90 @@ fn tab_sections(
         }
 
         let is_active = browser.active_index() == index;
-        let row_width = ui.available_width();
-        let close_size = theme.tokens.component.tab.close_size;
+        let row_width = ui.available_width().max(0.0);
+        let action_size = theme
+            .tokens
+            .component
+            .tab
+            .close_size
+            .max(theme.tokens.component.button.height_sm);
         let spacing = theme.tokens.primitive.space.xs;
-        let pin_size = theme.tokens.component.tab.close_size;
-        let move_size = theme.tokens.component.tab.close_size;
-        let actions_width = close_size + pin_size + (move_size * 2.0) + (spacing * 4.0);
-        let tab_width = (row_width - actions_width).max(48.0);
+        let actions_width = (action_size * 4.0) + (spacing * 4.0);
+        let tab_width = (row_width - actions_width).max(0.0);
+        let row_height = theme.tokens.component.tab.height;
 
         ui.push_id(format!("{:?}", tab.id), |ui| {
-            ui.horizontal(|ui| {
-                let tab_response = TabButton::new(&tab.title)
-                    .selected(is_active)
-                    .width(tab_width)
-                    .show(ui, theme);
+            let (row_rect, _) =
+                ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::hover());
+            let mut row_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(row_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            row_ui.set_clip_rect(row_rect);
+            row_ui.spacing_mut().item_spacing.x = spacing;
 
-                if tab_response.clicked() {
-                    selected_tab = Some(index);
-                }
+            let tab_response = TabButton::new(&tab.title)
+                .selected(is_active)
+                .width(tab_width)
+                .show(&mut row_ui, theme);
 
-                tab_response.context_menu(|ui| {
-                    if tab.pinned && !tab.highlighted {
-                        if ui.button("Promote to highlight").clicked() {
-                            highlighted_tab = Some(index);
-                            ui.close();
-                        }
-                    } else if !tab.pinned && ui.button("Pin tab").clicked() {
-                        pinned_tab = Some(index);
+            if tab_response.clicked() {
+                selected_tab = Some(index);
+            }
+
+            tab_response.context_menu(|ui| {
+                if tab.pinned && !tab.highlighted {
+                    if ui.button("Promote to highlight").clicked() {
+                        highlighted_tab = Some(index);
                         ui.close();
                     }
-                });
-
-                if DsButton::icon(Icon::Pin)
-                    .ghost()
-                    .small()
-                    .selected(tab.pinned)
-                    .width(pin_size)
-                    .show(ui, theme)
-                    .clicked()
-                {
+                } else if !tab.pinned && ui.button("Pin tab").clicked() {
                     pinned_tab = Some(index);
-                }
-
-                if DsButton::icon(Icon::ChevronUp)
-                    .ghost()
-                    .small()
-                    .width(move_size)
-                    .show(ui, theme)
-                    .clicked()
-                {
-                    moved_up_tab = Some(index);
-                }
-
-                if DsButton::icon(Icon::ChevronDown)
-                    .ghost()
-                    .small()
-                    .width(move_size)
-                    .show(ui, theme)
-                    .clicked()
-                {
-                    moved_down_tab = Some(index);
-                }
-
-                if DsButton::icon(Icon::X)
-                    .danger()
-                    .small()
-                    .width(close_size)
-                    .show(ui, theme)
-                    .clicked()
-                {
-                    closed_tab = Some(index);
+                    ui.close();
                 }
             });
+
+            if DsButton::icon(Icon::Pin)
+                .ghost()
+                .small()
+                .selected(tab.pinned)
+                .width(action_size)
+                .show(&mut row_ui, theme)
+                .clicked()
+            {
+                pinned_tab = Some(index);
+            }
+
+            if DsButton::icon(Icon::ChevronUp)
+                .ghost()
+                .small()
+                .width(action_size)
+                .show(&mut row_ui, theme)
+                .clicked()
+            {
+                moved_up_tab = Some(index);
+            }
+
+            if DsButton::icon(Icon::ChevronDown)
+                .ghost()
+                .small()
+                .width(action_size)
+                .show(&mut row_ui, theme)
+                .clicked()
+            {
+                moved_down_tab = Some(index);
+            }
+
+            if DsButton::icon(Icon::X)
+                .danger()
+                .small()
+                .width(action_size)
+                .show(&mut row_ui, theme)
+                .clicked()
+            {
+                closed_tab = Some(index);
+            }
         });
     }
 

@@ -137,7 +137,10 @@ impl<'a> DsButton<'a> {
             .corner_radius(button_tokens.radius)
             .min_size(egui::vec2(width, height));
 
-        let response = ui.add(button);
+        // `Button::min_size` only establishes a lower bound. In dense layouts such
+        // as the sidebar tab rows, its intrinsic label width could otherwise grow
+        // past the requested slot and push trailing actions outside the row clip.
+        let response = ui.add_sized(egui::vec2(width, height), button);
         if response.hovered() && matches!(self.variant, ButtonVariant::Ghost) {
             ui.painter().rect_stroke(
                 response.rect,

@@ -88,13 +88,17 @@ fn main() -> eframe::Result<()> {
     #[cfg(not(feature = "cef-renderer"))]
     let cef_available = false;
 
+    let app_icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/app/wind.png"))
+        .expect("the bundled Wind app icon must be a valid PNG");
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_maximized(true)
             .with_fullsize_content_view(true)
             .with_title_shown(false)
             .with_titlebar_shown(false)
-            .with_titlebar_buttons_shown(false),
+            .with_titlebar_buttons_shown(false)
+            .with_icon(app_icon),
         ..Default::default()
     };
 
