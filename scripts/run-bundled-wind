@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+
+# Cargo calls a target runner as: runner <compiled-binary> [application args...].
+# CEF on macOS must run from an app bundle, but copying its framework on every
+# source edit is expensive. Keep one bundle and refresh just its executables.
+set -euo pipefail
+
+app_binary="$1"
+shift
+
+# Do not change the behavior of explicitly run utility binaries such as
+# `cargo run --bin bundle_wind`.
+if [[ "$(basename "$app_binary")" != "wind" ]]; then
+  exec "$app_binary" "$@"
+fi
+
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+target_directory="$(dirname "$app_binary")"
+bundle="$target_directory/bundle/wind.app"
+inputs_file="$bundle/Contents/Resources/.wind-cef-inputs"
+profile_args=()
+if [[ "$(basename "$target_directory")" == "release" ]]; then
+  profile_args=(--release)
+fi
+
+bundle_inputs() {
+  shasum "$repository_root/Cargo.toml" "$repository_root/Cargo.lock"
+  printf 'CEF_PATH=%s\n' "${CEF_PATH:-cargo-managed}"
+
+  if [[ -n "${CEF_PATH:-}" && -e "$CEF_PATH" ]]; then
+    stat -f 'CEF_PATH_STAT=%m:%z' "$CEF_PATH"
+  fi
+
+  find "$repository_root/assets" -type f -exec shasum {} + | sort
+}
+
+inputs_hash="$(bundle_inputs | shasum | awk '{ print $1 }')"
+
+needs_bundle=false
+if [[ ! -d "$bundle" || ! -f "$inputs_file" || "$(<"$inputs_file")" != "$inputs_hash" ]]; then
+  needs_bundle=true
+fi
+
+if "$needs_bundle"; then
+  echo "Preparing the CEF app bundle..."
+  (
+    cd "$repository_root"
+    cargo build "${profile_args[@]}" --bin wind_helper
+    cargo build "${profile_args[@]}" --bin bundle_wind
+    "$target_directory/bundle_wind"
+  )
+
+  printf '%s\n' "$inputs_hash" > "$inputs_file"
+  codesign --force --deep --sign - "$bundle"
+else
+  (
+    cd "$repository_root"
+    cargo build "${profile_args[@]}" --bin wind_helper
+  )
+
+  cp -f "$app_binary" "$bundle/Contents/MacOS/wind"
+  for helper in \
+    "wind Helper" \
+    "wind Helper (Alerts)" \
+    "wind Helper (GPU)" \
+    "wind Helper (Plugin)" \
+    "wind Helper (Renderer)"; do
+    cp -f "$target_directory/wind_helper" \
+      "$bundle/Contents/Frameworks/$helper.app/Contents/MacOS/$helper"
+  done
+
+  codesign --force --deep --sign - "$bundle"
+fi
+
+exec "$bundle/Contents/MacOS/wind" "$@"

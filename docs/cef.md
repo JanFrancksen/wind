@@ -8,6 +8,14 @@ The default build uses the CEF/Chromium renderer:
 cargo run
 ```
 
+On macOS, `cargo run` automatically launches a persistent development app bundle.
+The first run creates the CEF bundle; subsequent runs only copy the rebuilt Wind
+and helper executables into it, rather than recopying the CEF framework. The
+bundle is recreated when its Cargo inputs, CEF source path, or assets change.
+
+To deliberately rebuild the bundle, remove `target/debug/bundle/wind.app` and
+run `cargo run` again.
+
 The placeholder renderer is only available for quick shell work with:
 
 ```sh
