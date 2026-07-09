@@ -100,10 +100,14 @@ impl NewTabScene {
             );
         }
 
-        let selected_shortcut = paint_home(ui, rect, browser, theme, None);
-        let search_rect = egui::Rect::from_center_size(
-            egui::pos2(rect.center().x, rect.top() + rect.height() * 0.22 + 170.0),
-            egui::vec2(rect.width().min(520.0), 52.0),
+        let selected_shortcut = paint_home(ui, rect, browser, theme, None, false);
+        let capsule_width = rect.width().min(520.0);
+        let search_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                rect.center().x - capsule_width / 2.0 + 58.0,
+                rect.top() + rect.height() * 0.22 + 144.0,
+            ),
+            egui::vec2(capsule_width - 70.0, 52.0),
         );
         let search = ui.put(
             search_rect,
@@ -146,7 +150,7 @@ pub fn paint_status(
     };
 
     paint_browser_canvas(ui, rect, theme);
-    let _ = paint_home(ui, rect, browser, theme, Some(message));
+    let _ = paint_home(ui, rect, browser, theme, Some(message), true);
 }
 
 fn paint_browser_canvas(ui: &mut egui::Ui, rect: egui::Rect, theme: &Theme) {
@@ -382,6 +386,7 @@ fn paint_home(
     browser: &BrowserState,
     theme: &Theme,
     message: Option<&str>,
+    draw_search_placeholder: bool,
 ) -> Option<&'static str> {
     let color = &theme.tokens.semantic.color;
     let active = browser.active_tab();
@@ -392,7 +397,7 @@ fn paint_home(
             ui.add_space(rect.height() * 0.22);
             wind_mark(ui, theme);
             ui.add_space(theme.tokens.primitive.space.lg);
-            search_capsule(ui, theme);
+            search_capsule(ui, theme, draw_search_placeholder);
             ui.add_space(theme.tokens.primitive.space.xl);
             selected_shortcut = launch_tiles(ui, theme);
 
@@ -446,7 +451,7 @@ fn wind_mark(ui: &mut egui::Ui, theme: &Theme) {
     );
 }
 
-fn search_capsule(ui: &mut egui::Ui, theme: &Theme) {
+fn search_capsule(ui: &mut egui::Ui, theme: &Theme, draw_placeholder: bool) {
     let width = ui.available_width().min(520.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 52.0), egui::Sense::click());
     let color = &theme.tokens.semantic.color;
@@ -471,13 +476,15 @@ fn search_capsule(ui: &mut egui::Ui, theme: &Theme) {
         ],
         egui::Stroke::new(2.0, color.text_muted),
     );
-    ui.painter().text(
-        egui::pos2(rect.left() + 58.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "Search the web...",
-        egui::FontId::proportional(theme.tokens.primitive.typography.body),
-        color.text_muted,
-    );
+    if draw_placeholder {
+        ui.painter().text(
+            egui::pos2(rect.left() + 58.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            "Search the web...",
+            egui::FontId::proportional(theme.tokens.primitive.typography.body),
+            color.text_muted,
+        );
+    }
 }
 
 fn launch_tiles(ui: &mut egui::Ui, theme: &Theme) -> Option<&'static str> {
