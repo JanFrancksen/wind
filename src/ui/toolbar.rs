@@ -8,7 +8,7 @@ use crate::{
     },
 };
 
-pub fn show(
+pub fn show_compact(
     ui: &mut egui::Ui,
     browser: &mut BrowserState,
     address_input: &mut String,
@@ -16,15 +16,14 @@ pub fn show(
 ) {
     handle_shortcuts(ui, browser, address_input);
 
-    let control = theme.tokens.primitive.size.control_md;
+    let control = theme.tokens.primitive.size.control_sm;
+    let go_width = 48.0;
     let gap = theme.tokens.primitive.space.sm;
-    let nav_width = (control * 3.0) + (gap * 3.0);
-    let go_width = 72.0;
-    let address_width = (ui.available_width() - nav_width - go_width).max(control);
 
     ui.horizontal(|ui| {
         if DsButton::icon(Icon::ArrowLeft)
             .ghost()
+            .small()
             .width(control)
             .show(ui, theme)
             .clicked()
@@ -36,6 +35,7 @@ pub fn show(
 
         if DsButton::icon(Icon::ArrowRight)
             .ghost()
+            .small()
             .width(control)
             .show(ui, theme)
             .clicked()
@@ -47,13 +47,19 @@ pub fn show(
 
         if DsButton::icon(Icon::Reload)
             .ghost()
+            .small()
             .width(control)
             .show(ui, theme)
             .clicked()
         {
             browser.reload();
         }
+    });
 
+    ui.add_space(gap);
+
+    let address_width = (ui.available_width() - go_width - gap).max(control);
+    ui.horizontal(|ui| {
         let response = TextField::singleline(address_input)
             .desired_width(address_width)
             .show(ui, theme);
@@ -62,6 +68,7 @@ pub fn show(
 
         if DsButton::new("Go")
             .primary()
+            .small()
             .width(go_width)
             .show(ui, theme)
             .clicked()

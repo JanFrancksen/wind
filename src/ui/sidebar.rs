@@ -8,34 +8,25 @@ use crate::{
     },
 };
 
+use super::toolbar;
+
 pub fn show(
     ui: &mut egui::Ui,
     browser: &mut BrowserState,
     address_input: &mut String,
     theme: &Theme,
-) {
+) -> bool {
     let space = &theme.tokens.primitive.space;
     let color = &theme.tokens.semantic.color;
+    let mut toggle_theme = false;
 
-    ui.add_space(space.md);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Wind")
-                .color(color.text)
-                .size(theme.tokens.primitive.typography.title)
-                .strong(),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            DsButton::icon(Icon::Command)
-                .ghost()
-                .small()
-                .width(theme.tokens.component.tab.close_size)
-                .show(ui, theme);
-        });
-    });
+    toolbar::show_compact(ui, browser, address_input, theme);
 
-    ui.add_space(space.sm);
-    space_switcher(ui, theme);
+    ui.add_space(space.lg);
+    quick_tiles(ui, theme);
+
+    ui.add_space(space.lg);
+    workspace_header(ui, theme);
 
     ui.add_space(space.sm);
     if DsButton::new("New Tab")
@@ -53,26 +44,101 @@ pub fn show(
     tab_sections(ui, browser, address_input, theme);
 
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-        ui.add_space(space.md);
+        ui.add_space(space.sm);
+        ui.horizontal(|ui| {
+            DsButton::icon(Icon::X)
+                .ghost()
+                .small()
+                .width(theme.tokens.component.tab.close_size)
+                .show(ui, theme);
+            if DsButton::new(theme.appearance_label())
+                .leading_icon(Icon::Command)
+                .ghost()
+                .small()
+                .width(110.0)
+                .show(ui, theme)
+                .clicked()
+            {
+                toggle_theme = true;
+            }
+        });
+        ui.add_space(space.sm);
+        divider(ui, theme);
+        ui.add_space(space.sm);
         ui.label(
-            egui::RichText::new("Personal")
+            egui::RichText::new("Wind Browser")
                 .color(color.text_muted)
                 .size(theme.tokens.primitive.typography.caption),
         );
     });
+
+    toggle_theme
 }
 
-fn space_switcher(ui: &mut egui::Ui, theme: &Theme) {
-    let width = ui.available_width();
-    let half = ((width - theme.tokens.primitive.space.xs) / 2.0).max(80.0);
+fn quick_tiles(ui: &mut egui::Ui, theme: &Theme) {
+    let labels = ["TB", "M", "Run", "◆", "TB", "◎", "≡", "▥"];
+    egui::Grid::new("quick_tiles")
+        .num_columns(4)
+        .spacing(egui::vec2(
+            theme.tokens.primitive.space.sm,
+            theme.tokens.primitive.space.sm,
+        ))
+        .show(ui, |ui| {
+            for (index, label) in labels.iter().enumerate() {
+                quick_tile(ui, label, theme);
+                if (index + 1) % 4 == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+}
 
+fn quick_tile(ui: &mut egui::Ui, label: &str, theme: &Theme) {
+    let size = 48.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let color = &theme.tokens.semantic.color;
+    let fill = if response.hovered() {
+        color.tile_hover
+    } else {
+        color.tile
+    };
+
+    ui.painter()
+        .rect_filled(rect, theme.tokens.primitive.radius.lg, fill);
+    ui.painter().rect_stroke(
+        rect,
+        theme.tokens.primitive.radius.lg,
+        egui::Stroke::new(theme.tokens.primitive.stroke.hairline, color.border),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::proportional(theme.tokens.primitive.typography.body_strong),
+        if label.contains('◆') {
+            color.accent
+        } else {
+            color.text_strong
+        },
+    );
+}
+
+fn workspace_header(ui: &mut egui::Ui, theme: &Theme) {
     ui.horizontal(|ui| {
-        DsButton::new("Personal")
-            .ghost()
-            .selected(true)
-            .width(half)
-            .show(ui, theme);
-        DsButton::new("Work").ghost().width(half).show(ui, theme);
+        ui.label(
+            egui::RichText::new("TidBITS")
+                .color(theme.tokens.semantic.color.text_strong)
+                .size(theme.tokens.primitive.typography.body_strong)
+                .strong(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            DsButton::icon(Icon::Command)
+                .ghost()
+                .small()
+                .width(theme.tokens.component.tab.close_size)
+                .show(ui, theme);
+        });
     });
 }
 

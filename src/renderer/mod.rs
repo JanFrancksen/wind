@@ -125,10 +125,10 @@ impl Default for BrowserRenderer {
 }
 
 impl RendererBackend {
-    fn new_default(cef_available: bool) -> Self {
+    fn new_default(_cef_available: bool) -> Self {
         #[cfg(feature = "cef-renderer")]
         {
-            if cef_available {
+            if _cef_available {
                 return Self::Cef(cef::CefRenderer::new());
             }
         }

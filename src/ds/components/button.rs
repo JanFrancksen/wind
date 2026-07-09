@@ -94,7 +94,7 @@ impl<'a> DsButton<'a> {
 
         let (fill, text, border) = match self.variant {
             ButtonVariant::Primary => (color.accent, color.accent_text, color.accent),
-            ButtonVariant::Secondary => (color.surface, color.text, color.border),
+            ButtonVariant::Secondary => (color.chrome, color.text, color.border),
             ButtonVariant::Ghost => (
                 if self.selected {
                     color.surface_active
@@ -144,6 +144,18 @@ impl<'a> DsButton<'a> {
             .corner_radius(button_tokens.radius)
             .min_size(egui::vec2(width, height));
 
-        ui.add(button)
+        let response = ui.add(button);
+        if response.hovered() && matches!(self.variant, ButtonVariant::Ghost) {
+            ui.painter().rect_stroke(
+                response.rect,
+                button_tokens.radius,
+                egui::Stroke::new(
+                    theme.tokens.primitive.stroke.hairline,
+                    theme.tokens.semantic.color.border,
+                ),
+                egui::StrokeKind::Inside,
+            );
+        }
+        response
     }
 }

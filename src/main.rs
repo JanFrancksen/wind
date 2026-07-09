@@ -35,7 +35,7 @@ impl BrowserApp {
             browser,
             renderer: BrowserRenderer::new(cef_available),
             address_input,
-            theme: Theme::arc_dark(),
+            theme: Theme::wind(ds::theming::ThemeAppearance::Alpine),
         }
     }
 }
@@ -53,7 +53,7 @@ impl eframe::App for BrowserApp {
             &mut self.browser,
             &mut self.renderer,
             &mut self.address_input,
-            &self.theme,
+            &mut self.theme,
         );
     }
 
@@ -79,7 +79,10 @@ fn main() -> eframe::Result<()> {
     #[cfg(not(feature = "cef-renderer"))]
     let cef_available = false;
 
-    let options = eframe::NativeOptions::default();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_maximized(true),
+        ..Default::default()
+    };
 
     let result = eframe::run_native(
         "Wind Browser",
