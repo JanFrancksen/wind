@@ -24,6 +24,7 @@ pub struct Tab {
     pub history: Vec<String>,
     pub history_index: usize,
     pub pinned: bool,
+    pub highlighted: bool,
     pub render_revision: u64,
 }
 
@@ -102,6 +103,7 @@ impl BrowserState {
             history: vec![url],
             history_index: 0,
             pinned: false,
+            highlighted: false,
             render_revision: 0,
         });
         self.active_tab = self.tabs.len() - 1;
@@ -166,6 +168,23 @@ impl BrowserState {
     pub fn toggle_pin_active_tab(&mut self) {
         let tab = &mut self.tabs[self.active_tab];
         tab.pinned = !tab.pinned;
+        if !tab.pinned {
+            tab.highlighted = false;
+        }
+        self.sort_pinned_tabs();
+    }
+
+    pub fn promote_active_pinned_tab(&mut self) {
+        let tab = &mut self.tabs[self.active_tab];
+        if tab.pinned {
+            tab.highlighted = true;
+            self.sort_pinned_tabs();
+        }
+    }
+
+    pub fn demote_active_highlighted_tab(&mut self) {
+        let tab = &mut self.tabs[self.active_tab];
+        tab.highlighted = false;
         self.sort_pinned_tabs();
     }
 
@@ -267,6 +286,7 @@ impl BrowserState {
             history: vec![url],
             history_index: 0,
             pinned: false,
+            highlighted: false,
             render_revision: 0,
         }
     }
@@ -281,7 +301,7 @@ impl BrowserState {
 
     fn sort_pinned_tabs(&mut self) {
         let active_id = self.active_tab().id;
-        self.tabs.sort_by_key(|tab| !tab.pinned);
+        self.tabs.sort_by_key(|tab| (!tab.pinned, !tab.highlighted));
         self.active_tab = self
             .tabs
             .iter()
@@ -477,5 +497,24 @@ mod tests {
         browser.submit_address_input(":move-up");
         assert_eq!(browser.active_index(), 2);
         assert_eq!(browser.active_tab().url, "https://docs.rs");
+    }
+
+    #[test]
+    fn promotes_pinned_tabs_to_highlights() {
+        let mut browser = BrowserState::default();
+
+        browser.submit_address_input(":new example.com");
+        browser.submit_address_input(":pin");
+        browser.promote_active_pinned_tab();
+        assert!(browser.tabs()[0].pinned);
+        assert!(browser.tabs()[0].highlighted);
+
+        browser.demote_active_highlighted_tab();
+        assert!(browser.tabs()[0].pinned);
+        assert!(!browser.tabs()[0].highlighted);
+
+        browser.toggle_pin_active_tab();
+        assert!(!browser.tabs()[1].pinned);
+        assert!(!browser.tabs()[1].highlighted);
     }
 }

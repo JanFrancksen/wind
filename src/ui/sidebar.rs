@@ -23,10 +23,7 @@ pub fn show(
     toolbar::show_compact(ui, browser, address_input, theme);
 
     ui.add_space(space.lg);
-    quick_tiles(ui, theme);
-
-    ui.add_space(space.lg);
-    workspace_header(ui, theme);
+    highlighted_pinned_tabs(ui, browser, address_input, theme);
 
     ui.add_space(space.sm);
     if DsButton::new("New Tab")
@@ -75,72 +72,134 @@ pub fn show(
     toggle_theme
 }
 
-fn quick_tiles(ui: &mut egui::Ui, theme: &Theme) {
-    let labels = ["TB", "M", "Run", "◆", "TB", "◎", "≡", "▥"];
+fn highlighted_pinned_tabs(
+    ui: &mut egui::Ui,
+    browser: &mut BrowserState,
+    address_input: &mut String,
+    theme: &Theme,
+) {
+    let tabs = browser.tabs().to_vec();
+    let highlighted_tabs = tabs
+        .iter()
+        .enumerate()
+        .filter(|(_, tab)| tab.pinned && tab.highlighted)
+        .collect::<Vec<_>>();
+
+    if highlighted_tabs.is_empty() {
+        return;
+    }
+
     let columns = 4;
     let spacing = theme.tokens.primitive.space.sm;
     let total_spacing = spacing * (columns - 1) as f32;
     let tile_size = ((ui.available_width() - total_spacing) / columns as f32).max(1.0);
+    let mut selected_tab = None;
+    let mut demoted_tab = None;
+    let mut unpinned_tab = None;
 
-    egui::Grid::new("quick_tiles")
+    egui::Grid::new("highlighted_pinned_tabs")
         .num_columns(columns)
         .spacing(egui::vec2(spacing, spacing))
         .show(ui, |ui| {
-            for (index, label) in labels.iter().enumerate() {
-                quick_tile(ui, label, tile_size, theme);
-                if (index + 1) % columns == 0 {
+            for (tile_index, (tab_index, tab)) in highlighted_tabs.iter().enumerate() {
+                let is_active = browser.active_index() == *tab_index;
+                let response = highlighted_pin_tile(ui, &tab.title, is_active, tile_size, theme);
+
+                if response.clicked() {
+                    selected_tab = Some(*tab_index);
+                }
+
+                response.context_menu(|ui| {
+                    if ui.button("Demote from highlight").clicked() {
+                        demoted_tab = Some(*tab_index);
+                        ui.close();
+                    }
+
+                    if ui.button("Unpin tab").clicked() {
+                        unpinned_tab = Some(*tab_index);
+                        ui.close();
+                    }
+                });
+
+                if (tile_index + 1) % columns == 0 {
                     ui.end_row();
                 }
             }
         });
+
+    if let Some(index) = selected_tab {
+        browser.select_tab(index);
+        *address_input = browser.active_url_for_input();
+    }
+
+    if let Some(index) = demoted_tab {
+        browser.select_tab(index);
+        browser.demote_active_highlighted_tab();
+        *address_input = browser.active_url_for_input();
+    }
+
+    if let Some(index) = unpinned_tab {
+        browser.select_tab(index);
+        browser.toggle_pin_active_tab();
+        *address_input = browser.active_url_for_input();
+    }
 }
 
-fn quick_tile(ui: &mut egui::Ui, label: &str, size: f32, theme: &Theme) {
+fn highlighted_pin_tile(
+    ui: &mut egui::Ui,
+    title: &str,
+    selected: bool,
+    size: f32,
+    theme: &Theme,
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     let color = &theme.tokens.semantic.color;
-    let fill = if response.hovered() {
+    let fill = if selected {
+        color.surface_active
+    } else if response.hovered() {
         color.tile_hover
     } else {
         color.tile
     };
+    let stroke_color = if selected { color.focus } else { color.border };
 
     ui.painter()
         .rect_filled(rect, theme.tokens.primitive.radius.lg, fill);
     ui.painter().rect_stroke(
         rect,
         theme.tokens.primitive.radius.lg,
-        egui::Stroke::new(theme.tokens.primitive.stroke.hairline, color.border),
+        egui::Stroke::new(theme.tokens.primitive.stroke.hairline, stroke_color),
         egui::StrokeKind::Inside,
     );
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
-        label,
+        tile_label(title),
         egui::FontId::proportional(theme.tokens.primitive.typography.body_strong),
-        if label.contains('◆') {
-            color.accent
-        } else {
-            color.text_strong
-        },
+        color.text_strong,
     );
+    response
 }
 
-fn workspace_header(ui: &mut egui::Ui, theme: &Theme) {
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("TidBITS")
-                .color(theme.tokens.semantic.color.text_strong)
-                .size(theme.tokens.primitive.typography.body_strong)
-                .strong(),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            DsButton::icon(Icon::Command)
-                .ghost()
-                .small()
-                .width(theme.tokens.component.tab.close_size)
-                .show(ui, theme);
-        });
-    });
+fn tile_label(title: &str) -> String {
+    let words = title
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+
+    if words.is_empty() {
+        return "?".to_string();
+    }
+
+    if words.len() == 1 {
+        return words[0].chars().take(3).collect::<String>();
+    }
+
+    words
+        .iter()
+        .take(3)
+        .filter_map(|word| word.chars().next())
+        .collect::<String>()
 }
 
 fn tab_sections(
@@ -157,16 +216,21 @@ fn tab_sections(
     let mut selected_tab = None;
     let mut closed_tab = None;
     let mut pinned_tab = None;
+    let mut highlighted_tab = None;
     let mut moved_up_tab = None;
     let mut moved_down_tab = None;
 
     for (index, tab) in tabs.iter().enumerate() {
-        if tab.pinned && index == 0 {
+        if tab.pinned && !tab.highlighted && (index == 0 || tabs[index - 1].highlighted) {
             section_label(ui, "Pinned", theme);
             ui.add_space(space.xs);
         } else if !tab.pinned && (index == 0 || tabs[index - 1].pinned) {
             section_label(ui, if has_pinned_tabs { "Today" } else { "Tabs" }, theme);
             ui.add_space(space.xs);
+        }
+
+        if tab.pinned && tab.highlighted {
+            continue;
         }
 
         let is_active = browser.active_index() == index;
@@ -180,14 +244,26 @@ fn tab_sections(
 
         ui.push_id(format!("{:?}", tab.id), |ui| {
             ui.horizontal(|ui| {
-                if TabButton::new(&tab.title)
+                let tab_response = TabButton::new(&tab.title)
                     .selected(is_active)
                     .width(tab_width)
-                    .show(ui, theme)
-                    .clicked()
-                {
+                    .show(ui, theme);
+
+                if tab_response.clicked() {
                     selected_tab = Some(index);
                 }
+
+                tab_response.context_menu(|ui| {
+                    if tab.pinned && !tab.highlighted {
+                        if ui.button("Promote to highlight").clicked() {
+                            highlighted_tab = Some(index);
+                            ui.close();
+                        }
+                    } else if !tab.pinned && ui.button("Pin tab").clicked() {
+                        pinned_tab = Some(index);
+                        ui.close();
+                    }
+                });
 
                 if DsButton::icon(Icon::Pin)
                     .ghost()
@@ -236,6 +312,12 @@ fn tab_sections(
     if let Some(index) = pinned_tab {
         browser.select_tab(index);
         browser.toggle_pin_active_tab();
+        *address_input = browser.active_url_for_input();
+    }
+
+    if let Some(index) = highlighted_tab {
+        browser.select_tab(index);
+        browser.promote_active_pinned_tab();
         *address_input = browser.active_url_for_input();
     }
 
