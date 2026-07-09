@@ -14,34 +14,45 @@ pub fn show_root(
     renderer: &mut BrowserRenderer,
     address_input: &mut String,
     theme: &mut Theme,
+    sidebar_width: &mut f32,
 ) {
     let available = ui.available_size();
     let full_rect = ui.max_rect();
     paint_app_backdrop(ui, full_rect, theme);
 
-    let sidebar_width = theme
-        .tokens
-        .primitive
-        .size
-        .sidebar_width
-        .min(available.x * 0.42)
-        .max(224.0);
-    let content_width = (available.x - sidebar_width).max(0.0);
+    let resize_handle_width = 8.0;
+    let min_sidebar_width = 224.0;
+    let min_content_width = 320.0;
+    let max_sidebar_width = (available.x - min_content_width - resize_handle_width)
+        .max(min_sidebar_width)
+        .min(available.x * 0.68);
+    *sidebar_width = sidebar_width.clamp(min_sidebar_width, max_sidebar_width);
+    let content_width = (available.x - *sidebar_width - resize_handle_width).max(0.0);
 
     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(
-            egui::vec2(sidebar_width, available.y),
+            egui::vec2(*sidebar_width, available.y),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 Surface::sidebar(theme).show(ui, |ui| {
-                    ui.set_min_size(egui::vec2(sidebar_width, available.y));
-                    ui.set_max_width(sidebar_width);
+                    ui.set_min_size(egui::vec2(*sidebar_width, available.y));
+                    ui.set_max_width(*sidebar_width);
                     if sidebar::show(ui, browser, address_input, theme) {
                         *theme = theme.toggled();
                     }
                 });
             },
+        );
+
+        sidebar_resize_handle(
+            ui,
+            sidebar_width,
+            min_sidebar_width,
+            max_sidebar_width,
+            resize_handle_width,
+            available.y,
+            theme,
         );
 
         ui.allocate_ui_with_layout(
@@ -53,6 +64,43 @@ pub fn show_root(
             },
         );
     });
+}
+
+fn sidebar_resize_handle(
+    ui: &mut egui::Ui,
+    sidebar_width: &mut f32,
+    min_width: f32,
+    max_width: f32,
+    handle_width: f32,
+    height: f32,
+    theme: &Theme,
+) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(handle_width, height),
+        egui::Sense::click_and_drag(),
+    );
+    let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+
+    if response.dragged() {
+        let delta = ui.input(|input| input.pointer.delta().x);
+        *sidebar_width = (*sidebar_width + delta).clamp(min_width, max_width);
+        ui.ctx().request_repaint();
+    }
+
+    if response.hovered() || response.dragged() {
+        let color = if response.dragged() {
+            theme.tokens.semantic.color.accent
+        } else {
+            theme.tokens.semantic.color.border
+        };
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.center().x, rect.top()),
+                egui::pos2(rect.center().x, rect.bottom()),
+            ],
+            egui::Stroke::new(theme.tokens.primitive.stroke.thin, color),
+        );
+    }
 }
 
 fn paint_app_backdrop(ui: &mut egui::Ui, rect: egui::Rect, theme: &Theme) {

@@ -14,6 +14,7 @@ struct BrowserApp {
     renderer: BrowserRenderer,
     address_input: String,
     theme: Theme,
+    sidebar_width: f32,
 }
 
 impl Default for BrowserApp {
@@ -31,11 +32,15 @@ impl BrowserApp {
         };
         let address_input = browser.active_url_for_input();
 
+        let theme = Theme::wind(ds::theming::ThemeAppearance::Alpine);
+        let sidebar_width = theme.tokens.primitive.size.sidebar_width;
+
         Self {
             browser,
             renderer: BrowserRenderer::new(cef_available),
             address_input,
-            theme: Theme::wind(ds::theming::ThemeAppearance::Alpine),
+            theme,
+            sidebar_width,
         }
     }
 }
@@ -54,6 +59,7 @@ impl eframe::App for BrowserApp {
             &mut self.renderer,
             &mut self.address_input,
             &mut self.theme,
+            &mut self.sidebar_width,
         );
     }
 
