@@ -17,7 +17,6 @@ pub fn show_compact(
     handle_shortcuts(ui, browser, address_input);
 
     let control = theme.tokens.primitive.size.control_sm;
-    let go_width = 48.0;
     let gap = theme.tokens.primitive.space.sm;
 
     ui.horizontal(|ui| {
@@ -58,26 +57,16 @@ pub fn show_compact(
 
     ui.add_space(gap);
 
-    let address_width = (ui.available_width() - go_width - gap).max(control);
-    ui.horizontal(|ui| {
-        let response = TextField::singleline(address_input)
-            .desired_width(address_width)
-            .show(ui, theme);
+    let response = TextField::singleline(address_input)
+        .placeholder("Search or enter address")
+        .desired_width(ui.available_width().max(control))
+        .show(ui, theme);
 
-        let pressed_enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-
-        if DsButton::new("Go")
-            .primary()
-            .small()
-            .width(go_width)
-            .show(ui, theme)
-            .clicked()
-            || pressed_enter
-        {
-            browser.submit_address_input(address_input);
-            *address_input = browser.active_url_for_input();
-        }
-    });
+    let pressed_enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    if pressed_enter {
+        browser.submit_address_input(address_input);
+        *address_input = browser.active_url_for_input();
+    }
 }
 
 fn handle_shortcuts(ui: &mut egui::Ui, browser: &mut BrowserState, address_input: &mut String) {

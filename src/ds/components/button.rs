@@ -4,7 +4,6 @@ use crate::ds::{icons::Icon, theming::Theme};
 
 #[derive(Clone, Copy)]
 pub enum ButtonVariant {
-    Primary,
     Secondary,
     Ghost,
     Danger,
@@ -53,11 +52,6 @@ impl<'a> DsButton<'a> {
         self
     }
 
-    pub fn primary(mut self) -> Self {
-        self.variant = ButtonVariant::Primary;
-        self
-    }
-
     pub fn ghost(mut self) -> Self {
         self.variant = ButtonVariant::Ghost;
         self
@@ -93,7 +87,6 @@ impl<'a> DsButton<'a> {
         };
 
         let (fill, text, border) = match self.variant {
-            ButtonVariant::Primary => (color.accent, color.accent_text, color.accent),
             ButtonVariant::Secondary => (color.chrome, color.text, color.border),
             ButtonVariant::Ghost => (
                 if self.selected {
