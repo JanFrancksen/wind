@@ -66,6 +66,7 @@ impl PhysicalRect {
 
 pub struct BrowserRenderer {
     backend: RendererBackend,
+    new_tab: placeholder::NewTabScene,
 }
 
 enum RendererBackend {
@@ -78,6 +79,7 @@ impl BrowserRenderer {
     pub fn new(cef_available: bool) -> Self {
         Self {
             backend: RendererBackend::new_default(cef_available),
+            new_tab: placeholder::NewTabScene::new(),
         }
     }
 
@@ -85,11 +87,18 @@ impl BrowserRenderer {
         &mut self,
         ui: &mut egui::Ui,
         frame: &mut eframe::Frame,
-        browser: &BrowserState,
+        browser: &mut BrowserState,
+        address_input: &mut String,
         theme: &Theme,
     ) {
         let available = ui.available_size();
         let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click());
+        if browser.active_tab().url == "arc://new-tab" {
+            self.backend.hide();
+            self.new_tab.paint(ui, rect, browser, address_input, theme);
+            return;
+        }
+
         let page = browser.active_page();
         let target = PageTarget::new(page, rect, ui.ctx().pixels_per_point());
         let status = self.backend.render(frame, &target);
@@ -98,10 +107,7 @@ impl BrowserRenderer {
             self.backend.focus();
         }
 
-        if target.page.url == "arc://new-tab" {
-            self.backend.hide();
-            placeholder::paint_new_tab(ui, rect, browser, theme);
-        } else if let RendererStatus::Ready = status {
+        if let RendererStatus::Ready = status {
             self.backend.show();
         } else {
             self.backend.hide();

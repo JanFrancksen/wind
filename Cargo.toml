@@ -10,6 +10,7 @@ eframe = "0.35.0"
 egui_extras = { version = "0.35.0", features = ["svg"] }
 raw-window-handle = { version = "0.6", optional = true }
 semver = "1.0"
+skia-safe = "0.99.0"
 
 [features]
 default = ["cef-renderer"]

@@ -1,4 +1,9 @@
+use std::time::Instant;
+
 use eframe::egui;
+use skia_safe::{
+    surfaces, AlphaType, Color, ColorType, ImageInfo, Paint, PaintStyle, PathBuilder, Point, Rect,
+};
 
 use crate::{
     browser::BrowserState,
@@ -32,11 +37,100 @@ impl PlaceholderRenderer {
     pub fn tick(&mut self) {}
 }
 
-pub fn paint_new_tab(ui: &mut egui::Ui, rect: egui::Rect, browser: &BrowserState, theme: &Theme) {
-    paint_browser_canvas(ui, rect, theme);
-    paint_home(ui, rect, browser, theme, None);
+/// The new-tab scene deliberately lives outside the browser renderer. It stays available when
+/// Chromium is unavailable and keeps its animated artwork entirely native.
+pub struct NewTabScene {
+    started_at: Instant,
+    last_rendered_at: Option<Instant>,
+    search_input: String,
+    texture: Option<egui::TextureHandle>,
 }
 
+impl NewTabScene {
+    pub fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            last_rendered_at: None,
+            search_input: String::new(),
+            texture: None,
+        }
+    }
+
+    pub fn paint(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        browser: &mut BrowserState,
+        address_input: &mut String,
+        theme: &Theme,
+    ) {
+        let should_render = self.texture.is_none()
+            || self
+                .last_rendered_at
+                .is_none_or(|last| last.elapsed() >= WIND_TUNNEL_FRAME_INTERVAL);
+        if should_render {
+            let elapsed = self.started_at.elapsed().as_secs_f32();
+            let pointer = ui
+                .ctx()
+                .input(|input| input.pointer.hover_pos())
+                .unwrap_or(rect.center());
+            let pointer = egui::pos2(
+                ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
+                ((pointer.y - rect.top()) / rect.height()).clamp(0.0, 1.0),
+            );
+            let image = render_wind_tunnel(rect.size(), elapsed, pointer);
+            if let Some(texture) = &mut self.texture {
+                texture.set(image, egui::TextureOptions::LINEAR);
+            } else {
+                self.texture = Some(ui.ctx().load_texture(
+                    "wind-tunnel-aurora",
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+            self.last_rendered_at = Some(Instant::now());
+        }
+
+        if let Some(texture) = &self.texture {
+            ui.painter().image(
+                texture.id(),
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+
+        let selected_shortcut = paint_home(ui, rect, browser, theme, None);
+        let search_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.center().x, rect.top() + rect.height() * 0.22 + 170.0),
+            egui::vec2(rect.width().min(520.0), 52.0),
+        );
+        let search = ui.put(
+            search_rect,
+            egui::TextEdit::singleline(&mut self.search_input)
+                .hint_text("Search the web or enter an address")
+                .frame(egui::Frame::NONE),
+        );
+        let submitted =
+            search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        if submitted && !self.search_input.trim().is_empty() {
+            browser.navigate_active(&self.search_input);
+            *address_input = browser.active_url_for_input();
+        } else if let Some(url) = selected_shortcut {
+            browser.navigate_active(url);
+            *address_input = browser.active_url_for_input();
+        }
+
+        ui.ctx().request_repaint_after(WIND_TUNNEL_FRAME_INTERVAL);
+    }
+}
+
+const WIND_TUNNEL_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+const WIND_TUNNEL_MAX_WIDTH: f32 = 960.0;
+const WIND_TUNNEL_MAX_HEIGHT: f32 = 640.0;
+const TWILIGHT_BANDS: usize = 72;
+const AURORA_RIBBONS: usize = 7;
+const STAR_COUNT: usize = 84;
 pub fn paint_status(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -52,7 +146,7 @@ pub fn paint_status(
     };
 
     paint_browser_canvas(ui, rect, theme);
-    paint_home(ui, rect, browser, theme, Some(message));
+    let _ = paint_home(ui, rect, browser, theme, Some(message));
 }
 
 fn paint_browser_canvas(ui: &mut egui::Ui, rect: egui::Rect, theme: &Theme) {
@@ -92,6 +186,139 @@ fn paint_browser_canvas(ui: &mut egui::Ui, rect: egui::Rect, theme: &Theme) {
     );
 
     paint_mountains(ui, rect, theme);
+}
+
+/// Render a deliberately modest-resolution image, then let egui scale it to the viewport.
+/// Skia handles every stroke and blend here; keeping this at <= 960px wide protects laptop
+/// batteries while preserving the soft, atmospheric quality of the scene.
+fn render_wind_tunnel(size: egui::Vec2, time: f32, pointer: egui::Pos2) -> egui::ColorImage {
+    let scale = (WIND_TUNNEL_MAX_WIDTH / size.x.max(1.0)).min(1.0);
+    let width = (size.x * scale).round().clamp(2.0, WIND_TUNNEL_MAX_WIDTH) as i32;
+    let height = (size.y * scale).round().clamp(2.0, WIND_TUNNEL_MAX_HEIGHT) as i32;
+    let mut surface = surfaces::raster_n32_premul((width, height))
+        .expect("Skia must create a raster surface for the new-tab scene");
+    let canvas = surface.canvas();
+    let bounds = Rect::from_wh(width as f32, height as f32);
+
+    paint_twilight(canvas, bounds);
+    paint_contours(canvas, bounds, time, pointer);
+    paint_aurora(canvas, bounds, time, pointer);
+    paint_stars(canvas, bounds, time);
+
+    let info = ImageInfo::new(
+        (width, height),
+        ColorType::RGBA8888,
+        AlphaType::Premul,
+        None,
+    );
+    let mut pixels = vec![0; width as usize * height as usize * 4];
+    surface.read_pixels(&info, &mut pixels, (width * 4) as usize, (0, 0));
+    egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &pixels)
+}
+
+fn paint_twilight(canvas: &skia_safe::Canvas, bounds: Rect) {
+    for band in 0..TWILIGHT_BANDS {
+        let t = band as f32 / (TWILIGHT_BANDS - 1) as f32;
+        let r = (7.0 + 6.0 * t) as u8;
+        let g = (15.0 + 20.0 * t) as u8;
+        let b = (31.0 + 28.0 * t) as u8;
+        let mut paint = Paint::default();
+        paint.set_color(Color::from_argb(255, r, g, b));
+        canvas.draw_rect(
+            Rect::from_xywh(
+                0.0,
+                bounds.height() * t,
+                bounds.width(),
+                bounds.height() / TWILIGHT_BANDS as f32 + 1.0,
+            ),
+            &paint,
+        );
+    }
+}
+
+fn paint_contours(canvas: &skia_safe::Canvas, bounds: Rect, time: f32, pointer: egui::Pos2) {
+    let drift = (pointer.x - 0.5) * 38.0;
+    for row in 0..17 {
+        let y = bounds.height() * (0.26 + row as f32 * 0.056);
+        let mut path = PathBuilder::new();
+        path.move_to(Point::new(-20.0, y));
+        for segment in 0..8 {
+            let x = segment as f32 * bounds.width() / 7.0;
+            let crest = y
+                + (time * 0.45 + row as f32 * 0.61 + segment as f32).sin() * 10.0
+                + drift * (segment as f32 / 7.0 - 0.5);
+            path.cubic_to(
+                Point::new(x + bounds.width() * 0.04, crest - 9.0),
+                Point::new(x + bounds.width() * 0.10, crest + 9.0),
+                Point::new(x + bounds.width() / 7.0, crest),
+            );
+        }
+        let path = path.detach();
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_style(PaintStyle::Stroke);
+        paint.set_stroke_width(0.75);
+        paint.set_color(Color::from_argb(20, 142, 230, 207));
+        canvas.draw_path(&path, &paint);
+    }
+}
+
+fn paint_aurora(canvas: &skia_safe::Canvas, bounds: Rect, time: f32, pointer: egui::Pos2) {
+    let pointer_pull = (pointer.y - 0.5) * 52.0;
+    for ribbon in 0..AURORA_RIBBONS {
+        let phase = time * (0.34 + ribbon as f32 * 0.025) + ribbon as f32 * 0.91;
+        let base_y = bounds.height() * (0.36 + ribbon as f32 * 0.045) + pointer_pull;
+        let mut path = PathBuilder::new();
+        path.move_to(Point::new(-40.0, base_y));
+        for section in 0..7 {
+            let x = section as f32 * bounds.width() / 6.0;
+            let wave = phase.sin() * 35.0
+                + (phase * 1.7 + section as f32 * 0.9).cos() * 22.0
+                + (pointer.x - 0.5) * 70.0 * (section as f32 / 6.0);
+            path.cubic_to(
+                Point::new(x + bounds.width() * 0.06, base_y + wave * 1.15),
+                Point::new(x + bounds.width() * 0.11, base_y - wave * 0.55),
+                Point::new(x + bounds.width() / 6.0, base_y + wave),
+            );
+        }
+
+        let path = path.detach();
+        for (width, alpha) in [(46.0, 10), (24.0, 21), (8.0, 68), (2.0, 175)] {
+            let mut paint = Paint::default();
+            paint.set_anti_alias(true);
+            paint.set_style(PaintStyle::Stroke);
+            paint.set_stroke_width(width);
+            let color = if ribbon % 2 == 0 {
+                Color::from_argb(alpha, 83, 255, 196)
+            } else {
+                Color::from_argb(alpha, 78, 179, 255)
+            };
+            paint.set_color(color);
+            canvas.draw_path(&path, &paint);
+        }
+    }
+}
+
+fn paint_stars(canvas: &skia_safe::Canvas, bounds: Rect, time: f32) {
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    for index in 0..STAR_COUNT {
+        let seed = index as f32 * 12.9898;
+        let x = fract(seed.sin() * 43_758.547) * bounds.width();
+        let y = fract((seed + 1.0).cos() * 18_293.64) * bounds.height() * 0.63;
+        let pulse = ((time * 1.6 + seed).sin() + 1.0) * 0.5;
+        paint.set_color(Color::from_argb(
+            (35.0 + pulse * 110.0) as u8,
+            205,
+            245,
+            240,
+        ));
+        canvas.draw_circle(Point::new(x, y), 0.45 + pulse * 0.9, &paint);
+    }
+}
+
+fn fract(value: f32) -> f32 {
+    value - value.floor()
 }
 
 fn paint_mountains(ui: &mut egui::Ui, rect: egui::Rect, theme: &Theme) {
@@ -155,9 +382,10 @@ fn paint_home(
     browser: &BrowserState,
     theme: &Theme,
     message: Option<&str>,
-) {
+) -> Option<&'static str> {
     let color = &theme.tokens.semantic.color;
     let active = browser.active_tab();
+    let mut selected_shortcut = None;
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.vertical_centered(|ui| {
@@ -166,7 +394,7 @@ fn paint_home(
             ui.add_space(theme.tokens.primitive.space.lg);
             search_capsule(ui, theme);
             ui.add_space(theme.tokens.primitive.space.xl);
-            launch_tiles(ui, theme);
+            selected_shortcut = launch_tiles(ui, theme);
 
             if let Some(message) = message {
                 ui.add_space(theme.tokens.primitive.space.xl);
@@ -183,6 +411,8 @@ fn paint_home(
             }
         });
     });
+
+    selected_shortcut
 }
 
 fn wind_mark(ui: &mut egui::Ui, theme: &Theme) {
@@ -250,17 +480,28 @@ fn search_capsule(ui: &mut egui::Ui, theme: &Theme) {
     );
 }
 
-fn launch_tiles(ui: &mut egui::Ui, theme: &Theme) {
-    let labels = ["N", "▶", "X", "L", "M", "+"];
+fn launch_tiles(ui: &mut egui::Ui, theme: &Theme) -> Option<&'static str> {
+    let tiles = [
+        ("N", "https://www.notion.so"),
+        ("▶", "https://www.youtube.com"),
+        ("X", "https://x.com"),
+        ("L", "https://linear.app"),
+        ("M", "https://mail.google.com"),
+        ("+", "arc://new-tab"),
+    ];
+    let mut selected = None;
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 28.0;
-        for label in labels {
-            launch_tile(ui, label, theme);
+        for (label, url) in tiles {
+            if launch_tile(ui, label, theme).clicked() && label != "+" {
+                selected = Some(url);
+            }
         }
     });
+    selected
 }
 
-fn launch_tile(ui: &mut egui::Ui, label: &str, theme: &Theme) {
+fn launch_tile(ui: &mut egui::Ui, label: &str, theme: &Theme) -> egui::Response {
     let size = theme.tokens.primitive.size.tile;
     ui.vertical_centered(|ui| {
         let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
@@ -304,7 +545,9 @@ fn launch_tile(ui: &mut egui::Ui, label: &str, theme: &Theme) {
             .color(color.text)
             .size(theme.tokens.primitive.typography.caption),
         );
-    });
+        response
+    })
+    .inner
 }
 
 fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {

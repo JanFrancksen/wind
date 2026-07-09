@@ -59,7 +59,15 @@ pub fn show_root(
         );
     }
 
-    show_content_surface(ui, frame, browser, renderer, theme, content_rect);
+    show_content_surface(
+        ui,
+        frame,
+        browser,
+        renderer,
+        address_input,
+        theme,
+        content_rect,
+    );
 
     if sidebar_progress > 0.98 {
         invisible_sidebar_resize_handle(
@@ -121,6 +129,7 @@ fn show_content_surface(
     frame: &mut eframe::Frame,
     browser: &mut BrowserState,
     renderer: &mut BrowserRenderer,
+    address_input: &mut String,
     theme: &Theme,
     rect: egui::Rect,
 ) {
@@ -131,7 +140,14 @@ fn show_content_surface(
     );
     content_ui.set_clip_rect(rect);
     content_ui.set_min_size(rect.size());
-    show_browser_surface(&mut content_ui, frame, browser, renderer, theme);
+    show_browser_surface(
+        &mut content_ui,
+        frame,
+        browser,
+        renderer,
+        address_input,
+        theme,
+    );
 }
 
 fn handle_sidebar_shortcut(ui: &mut egui::Ui, sidebar_collapsed: &mut bool) {
@@ -224,7 +240,8 @@ fn show_browser_surface(
     frame: &mut eframe::Frame,
     browser: &mut BrowserState,
     renderer: &mut BrowserRenderer,
+    address_input: &mut String,
     theme: &Theme,
 ) {
-    renderer.show(ui, frame, browser, theme);
+    renderer.show(ui, frame, browser, address_input, theme);
 }
