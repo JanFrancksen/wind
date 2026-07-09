@@ -2,12 +2,12 @@ use std::time::Instant;
 
 use eframe::egui;
 use skia_safe::{
-    surfaces, AlphaType, Color, ColorType, ImageInfo, Paint, PaintStyle, PathBuilder, Point, Rect,
+    AlphaType, Color, ColorType, ImageInfo, Paint, PaintStyle, PathBuilder, Point, Rect, surfaces,
 };
 
 use crate::{
     browser::BrowserState,
-    ds::theming::Theme,
+    ds::{components::SearchField, theming::Theme},
     renderer::{PageTarget, RendererStatus},
 };
 
@@ -100,27 +100,11 @@ impl NewTabScene {
             );
         }
 
-        let selected_shortcut = paint_home(ui, rect, browser, theme, None, false);
-        let capsule_width = rect.width().min(520.0);
-        let search_rect = egui::Rect::from_min_size(
-            egui::pos2(
-                rect.center().x - capsule_width / 2.0 + 58.0,
-                rect.top() + rect.height() * 0.22 + 144.0,
-            ),
-            egui::vec2(capsule_width - 70.0, 52.0),
-        );
-        let search = ui.put(
-            search_rect,
-            egui::TextEdit::singleline(&mut self.search_input)
-                .hint_text("Search the web or enter an address")
-                .frame(egui::Frame::NONE),
-        );
-        let submitted =
-            search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        if submitted && !self.search_input.trim().is_empty() {
-            browser.navigate_active(&self.search_input);
+        let home = paint_home(ui, rect, browser, theme, None, Some(&mut self.search_input));
+        if home.submitted && !self.search_input.trim().is_empty() {
+            browser.submit_address_input(&self.search_input);
             *address_input = browser.active_url_for_input();
-        } else if let Some(url) = selected_shortcut {
+        } else if let Some(url) = home.selected_shortcut {
             browser.navigate_active(url);
             *address_input = browser.active_url_for_input();
         }
@@ -150,7 +134,7 @@ pub fn paint_status(
     };
 
     paint_browser_canvas(ui, rect, theme);
-    let _ = paint_home(ui, rect, browser, theme, Some(message), true);
+    let _ = paint_home(ui, rect, browser, theme, Some(message), None);
 }
 
 fn paint_browser_canvas(ui: &mut egui::Ui, rect: egui::Rect, theme: &Theme) {
@@ -386,20 +370,31 @@ fn paint_home(
     browser: &BrowserState,
     theme: &Theme,
     message: Option<&str>,
-    draw_search_placeholder: bool,
-) -> Option<&'static str> {
+    search_input: Option<&mut String>,
+) -> HomeInteraction {
     let color = &theme.tokens.semantic.color;
     let active = browser.active_tab();
-    let mut selected_shortcut = None;
+    let mut interaction = HomeInteraction::default();
+    let mut placeholder_search = String::new();
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space(rect.height() * 0.22);
             wind_mark(ui, theme);
             ui.add_space(theme.tokens.primitive.space.lg);
-            search_capsule(ui, theme, draw_search_placeholder);
+            let (search_input, enabled) = match search_input {
+                Some(value) => (value, true),
+                None => (&mut placeholder_search, false),
+            };
+            let search = SearchField::empty_page(search_input)
+                .desired_width(520.0)
+                .enabled(enabled)
+                .show(ui, theme);
+            interaction.submitted = enabled
+                && search.lost_focus()
+                && ui.input(|input| input.key_pressed(egui::Key::Enter));
             ui.add_space(theme.tokens.primitive.space.xl);
-            selected_shortcut = launch_tiles(ui, theme);
+            interaction.selected_shortcut = launch_tiles(ui, theme);
 
             if let Some(message) = message {
                 ui.add_space(theme.tokens.primitive.space.xl);
@@ -417,7 +412,13 @@ fn paint_home(
         });
     });
 
-    selected_shortcut
+    interaction
+}
+
+#[derive(Default)]
+struct HomeInteraction {
+    selected_shortcut: Option<&'static str>,
+    submitted: bool,
 }
 
 fn wind_mark(ui: &mut egui::Ui, theme: &Theme) {
@@ -449,42 +450,6 @@ fn wind_mark(ui: &mut egui::Ui, theme: &Theme) {
         egui::FontId::proportional(theme.tokens.primitive.typography.brand),
         color.text_strong,
     );
-}
-
-fn search_capsule(ui: &mut egui::Ui, theme: &Theme, draw_placeholder: bool) {
-    let width = ui.available_width().min(520.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 52.0), egui::Sense::click());
-    let color = &theme.tokens.semantic.color;
-
-    ui.painter()
-        .rect_filled(rect, theme.tokens.primitive.radius.round, color.surface);
-    ui.painter().rect_stroke(
-        rect,
-        theme.tokens.primitive.radius.round,
-        egui::Stroke::new(theme.tokens.primitive.stroke.hairline, color.border),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().circle_stroke(
-        egui::pos2(rect.left() + 30.0, rect.center().y - 1.0),
-        7.0,
-        egui::Stroke::new(2.0, color.text_muted),
-    );
-    ui.painter().line_segment(
-        [
-            egui::pos2(rect.left() + 35.5, rect.center().y + 5.0),
-            egui::pos2(rect.left() + 42.0, rect.center().y + 11.0),
-        ],
-        egui::Stroke::new(2.0, color.text_muted),
-    );
-    if draw_placeholder {
-        ui.painter().text(
-            egui::pos2(rect.left() + 58.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            "Search the web...",
-            egui::FontId::proportional(theme.tokens.primitive.typography.body),
-            color.text_muted,
-        );
-    }
 }
 
 fn launch_tiles(ui: &mut egui::Ui, theme: &Theme) -> Option<&'static str> {

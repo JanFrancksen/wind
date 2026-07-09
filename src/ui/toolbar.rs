@@ -3,7 +3,7 @@ use eframe::egui;
 use crate::{
     browser::BrowserState,
     ds::{
-        components::{DsButton, Icon, TextField},
+        components::{DsButton, Icon, SearchField},
         theming::Theme,
     },
 };
@@ -69,8 +69,7 @@ pub fn show_compact(
 
     ui.add_space(gap);
 
-    let response = TextField::singleline(address_input)
-        .placeholder("Search or enter address")
+    let response = SearchField::sidebar(address_input)
         .desired_width(ui.available_width().max(control))
         .show(ui, theme);
 
