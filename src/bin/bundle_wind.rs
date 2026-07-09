@@ -1,8 +1,8 @@
 #[cfg(all(feature = "cef-renderer", target_os = "macos"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use cef::build_util::mac::{BundleInfo, build_bundle};
+    use cef::build_util::mac::{bundle, BundleInfo};
     use semver::Version;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     let bundle_info = BundleInfo {
         name: "wind".to_string(),
@@ -12,8 +12,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         version: Version::parse(env!("CARGO_PKG_VERSION"))?,
     };
 
-    let output_path = Path::new("target/debug/bundle");
-    let bundle_path = build_bundle(output_path, "wind", bundle_info)?;
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let target_path = Path::new("target").join(profile);
+    let output_path = target_path.join("bundle");
+    let bundle_path = bundle(
+        &output_path,
+        &target_path,
+        "wind",
+        "wind_helper",
+        Some(PathBuf::from("assets")),
+        bundle_info,
+    )?;
     sign_bundle(&bundle_path)?;
 
     println!("Run the bundled app from {}", bundle_path.display());
