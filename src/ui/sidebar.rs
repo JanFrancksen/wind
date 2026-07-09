@@ -77,24 +77,25 @@ pub fn show(
 
 fn quick_tiles(ui: &mut egui::Ui, theme: &Theme) {
     let labels = ["TB", "M", "Run", "◆", "TB", "◎", "≡", "▥"];
+    let columns = 4;
+    let spacing = theme.tokens.primitive.space.sm;
+    let total_spacing = spacing * (columns - 1) as f32;
+    let tile_size = ((ui.available_width() - total_spacing) / columns as f32).max(1.0);
+
     egui::Grid::new("quick_tiles")
-        .num_columns(4)
-        .spacing(egui::vec2(
-            theme.tokens.primitive.space.sm,
-            theme.tokens.primitive.space.sm,
-        ))
+        .num_columns(columns)
+        .spacing(egui::vec2(spacing, spacing))
         .show(ui, |ui| {
             for (index, label) in labels.iter().enumerate() {
-                quick_tile(ui, label, theme);
-                if (index + 1) % 4 == 0 {
+                quick_tile(ui, label, tile_size, theme);
+                if (index + 1) % columns == 0 {
                     ui.end_row();
                 }
             }
         });
 }
 
-fn quick_tile(ui: &mut egui::Ui, label: &str, theme: &Theme) {
-    let size = 48.0;
+fn quick_tile(ui: &mut egui::Ui, label: &str, size: f32, theme: &Theme) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     let color = &theme.tokens.semantic.color;
     let fill = if response.hovered() {
