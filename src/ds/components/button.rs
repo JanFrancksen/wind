@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use crate::ds::theming::Theme;
+use crate::ds::{icons::Icon, theming::Theme};
 
 #[derive(Clone, Copy)]
 pub enum ButtonVariant {
@@ -18,6 +18,7 @@ pub enum ButtonSize {
 
 pub struct DsButton<'a> {
     label: &'a str,
+    icon: Option<Icon>,
     variant: ButtonVariant,
     size: ButtonSize,
     selected: bool,
@@ -28,11 +29,28 @@ impl<'a> DsButton<'a> {
     pub fn new(label: &'a str) -> Self {
         Self {
             label,
+            icon: None,
             variant: ButtonVariant::Secondary,
             size: ButtonSize::Md,
             selected: false,
             desired_width: None,
         }
+    }
+
+    pub fn icon(icon: Icon) -> Self {
+        Self {
+            label: "",
+            icon: Some(icon),
+            variant: ButtonVariant::Secondary,
+            size: ButtonSize::Md,
+            selected: false,
+            desired_width: None,
+        }
+    }
+
+    pub fn leading_icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
     }
 
     pub fn primary(mut self) -> Self {
@@ -68,10 +86,10 @@ impl<'a> DsButton<'a> {
 
     pub fn show(self, ui: &mut egui::Ui, theme: &Theme) -> egui::Response {
         let color = &theme.tokens.semantic.color;
-        let button = &theme.tokens.component.button;
+        let button_tokens = &theme.tokens.component.button;
         let height = match self.size {
-            ButtonSize::Sm => button.height_sm,
-            ButtonSize::Md => button.height_md,
+            ButtonSize::Sm => button_tokens.height_sm,
+            ButtonSize::Md => button_tokens.height_md,
         };
 
         let (fill, text, border) = match self.variant {
@@ -93,21 +111,39 @@ impl<'a> DsButton<'a> {
             ),
         };
 
-        let width = self.desired_width.unwrap_or(button.min_width).max(height);
+        let width = self
+            .desired_width
+            .unwrap_or(button_tokens.min_width)
+            .max(height);
 
-        ui.add(
-            egui::Button::new(
-                egui::RichText::new(self.label)
-                    .color(text)
-                    .size(theme.tokens.primitive.typography.body),
-            )
+        let label = egui::RichText::new(self.label)
+            .color(text)
+            .size(theme.tokens.primitive.typography.body);
+        let icon_size = match self.size {
+            ButtonSize::Sm => 14.0,
+            ButtonSize::Md => 16.0,
+        };
+
+        let mut button = if let Some(icon) = self.icon {
+            let icon = icon.image(icon_size, text);
+            if self.label.is_empty() {
+                egui::Button::image(icon)
+            } else {
+                egui::Button::image_and_text(icon, label)
+            }
+        } else {
+            egui::Button::new(label)
+        };
+
+        button = button
             .fill(fill)
             .stroke(egui::Stroke::new(
                 theme.tokens.primitive.stroke.hairline,
                 border,
             ))
-            .corner_radius(button.radius)
-            .min_size(egui::vec2(width, height)),
-        )
+            .corner_radius(button_tokens.radius)
+            .min_size(egui::vec2(width, height));
+
+        ui.add(button)
     }
 }

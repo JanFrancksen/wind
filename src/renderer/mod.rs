@@ -1,0 +1,190 @@
+mod placeholder;
+
+#[cfg(feature = "cef-renderer")]
+mod cef;
+
+use eframe::egui;
+
+use crate::{
+    browser::{ActivePage, BrowserState},
+    ds::theming::Theme,
+};
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RendererStatus {
+    Ready,
+    WaitingForNativeBrowser,
+    UnsupportedUrl(String),
+    Unavailable(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageTarget {
+    pub page: ActivePage,
+    pub bounds: PhysicalRect,
+}
+
+impl PageTarget {
+    fn new(page: ActivePage, rect: egui::Rect, pixels_per_point: f32) -> Self {
+        #[cfg(target_os = "macos")]
+        let effective_pixels_per_point = {
+            let _ = pixels_per_point;
+            1.0
+        };
+        #[cfg(not(target_os = "macos"))]
+        let effective_pixels_per_point = pixels_per_point;
+
+        Self {
+            page,
+            bounds: PhysicalRect::from_egui(rect, effective_pixels_per_point),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhysicalRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl PhysicalRect {
+    fn from_egui(rect: egui::Rect, pixels_per_point: f32) -> Self {
+        let min = rect.min * pixels_per_point;
+        let size = rect.size() * pixels_per_point;
+
+        Self {
+            x: min.x.round() as i32,
+            y: min.y.round() as i32,
+            width: size.x.round().max(1.0) as i32,
+            height: size.y.round().max(1.0) as i32,
+        }
+    }
+}
+
+pub struct BrowserRenderer {
+    backend: RendererBackend,
+}
+
+enum RendererBackend {
+    Placeholder(placeholder::PlaceholderRenderer),
+    #[cfg(feature = "cef-renderer")]
+    Cef(cef::CefRenderer),
+}
+
+impl BrowserRenderer {
+    pub fn new(cef_available: bool) -> Self {
+        Self {
+            backend: RendererBackend::new_default(cef_available),
+        }
+    }
+
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        frame: &mut eframe::Frame,
+        browser: &BrowserState,
+        theme: &Theme,
+    ) {
+        let available = ui.available_size();
+        let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click());
+        let page = browser.active_page();
+        let target = PageTarget::new(page, rect, ui.ctx().pixels_per_point());
+        let status = self.backend.render(frame, &target);
+
+        if response.clicked() {
+            self.backend.focus();
+        }
+
+        if target.page.url == "arc://new-tab" {
+            self.backend.hide();
+            placeholder::paint_new_tab(ui, rect, browser, theme);
+        } else if let RendererStatus::Ready = status {
+            self.backend.show();
+        } else {
+            self.backend.hide();
+            placeholder::paint_status(ui, rect, browser, theme, &status);
+        }
+    }
+
+    pub fn shutdown(&mut self) {
+        self.backend.shutdown();
+    }
+
+    pub fn tick(&mut self) {
+        self.backend.tick();
+    }
+}
+
+impl Default for BrowserRenderer {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
+
+impl RendererBackend {
+    fn new_default(cef_available: bool) -> Self {
+        #[cfg(feature = "cef-renderer")]
+        {
+            if cef_available {
+                return Self::Cef(cef::CefRenderer::new());
+            }
+        }
+
+        #[allow(unreachable_code)]
+        Self::Placeholder(placeholder::PlaceholderRenderer::new())
+    }
+
+    fn render(&mut self, frame: &mut eframe::Frame, target: &PageTarget) -> RendererStatus {
+        match self {
+            Self::Placeholder(renderer) => renderer.render(frame, target),
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.render(frame, target),
+        }
+    }
+
+    fn show(&mut self) {
+        match self {
+            Self::Placeholder(renderer) => renderer.show(),
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.show(),
+        }
+    }
+
+    fn hide(&mut self) {
+        match self {
+            Self::Placeholder(renderer) => renderer.hide(),
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.hide(),
+        }
+    }
+
+    fn focus(&mut self) {
+        match self {
+            Self::Placeholder(renderer) => renderer.focus(),
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.focus(),
+        }
+    }
+
+    fn shutdown(&mut self) {
+        match self {
+            Self::Placeholder(renderer) => renderer.shutdown(),
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.shutdown(),
+        }
+    }
+
+    fn tick(&mut self) {
+        match self {
+            Self::Placeholder(renderer) => renderer.tick(),
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.tick(),
+        }
+    }
+}
+
+#[cfg(feature = "cef-renderer")]
+pub use cef::{CefRuntime, CefRuntimeError};

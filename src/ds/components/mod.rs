@@ -4,6 +4,7 @@ mod surface;
 mod tab_button;
 mod text_field;
 
+pub use crate::ds::icons::Icon;
 #[allow(unused_imports)]
 pub use button::{ButtonSize, ButtonVariant, DsButton};
 pub use divider::divider;
