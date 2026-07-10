@@ -234,6 +234,7 @@ fn load_cef_library() -> Result<CefLibrary, CefRuntimeError> {
 pub struct CefRenderer {
     shortcuts: SharedShortcutBridge,
     tabs: HashMap<TabId, CefTab>,
+    closing_tabs: Vec<CefTab>,
     active_tab: Option<TabId>,
     surface_visible: bool,
 }
@@ -245,6 +246,7 @@ struct BrowserSlot {
     browser: Option<Browser>,
     visible: bool,
     close_when_created: bool,
+    closed: bool,
 }
 
 type SharedBrowser = Rc<RefCell<BrowserSlot>>;
@@ -288,6 +290,7 @@ impl CefRenderer {
         Self {
             shortcuts: Rc::new(ShortcutBridge::default()),
             tabs: HashMap::new(),
+            closing_tabs: Vec::new(),
             active_tab: None,
             surface_visible: true,
         }
@@ -370,17 +373,28 @@ impl CefRenderer {
 
     pub fn sync_tabs(&mut self, tab_ids: impl IntoIterator<Item = TabId>) {
         let live_tabs = tab_ids.into_iter().collect::<HashSet<_>>();
-        self.tabs.retain(|tab_id, tab| {
-            if live_tabs.contains(tab_id) {
-                return true;
-            }
+        self.closing_tabs.retain(|tab| !tab.browser.borrow().closed);
 
+        let closing_tab_ids = self
+            .tabs
+            .keys()
+            .filter(|tab_id| !live_tabs.contains(tab_id))
+            .copied()
+            .collect::<Vec<_>>();
+
+        for tab_id in closing_tab_ids {
+            let Some(tab) = self.tabs.remove(&tab_id) else {
+                continue;
+            };
             let browser = request_browser_close(&tab.browser);
             if let Some(host) = browser.and_then(|browser| browser.host()) {
                 host.close_browser(1);
             }
-            false
-        });
+            // CEF closes browsers asynchronously and may continue invoking the
+            // client until `on_before_close`. Retain the callback owner until
+            // that lifecycle notification has run.
+            self.closing_tabs.push(tab);
+        }
 
         if self
             .active_tab
@@ -487,6 +501,12 @@ fn request_browser_close(slot: &SharedBrowser) -> Option<Browser> {
     slot.browser.clone()
 }
 
+fn finish_browser_close(slot: &SharedBrowser) {
+    let mut slot = slot.borrow_mut();
+    slot.browser = None;
+    slot.closed = true;
+}
+
 fn should_show_tab(surface_visible: bool, active_tab: Option<TabId>, tab_id: TabId) -> bool {
     surface_visible && active_tab == Some(tab_id)
 }
@@ -560,6 +580,10 @@ wrap_life_span_handler! {
             } else {
                 set_child_window_visible(&browser, visible);
             }
+        }
+
+        fn on_before_close(&self, _browser: Option<&mut Browser>) {
+            finish_browser_close(&self.browser);
         }
     }
 }
@@ -664,6 +688,42 @@ mod shortcut_tests {
         assert!(!slot.borrow().visible);
         assert!(request_browser_close(&slot).is_none());
         assert!(slot.borrow().close_when_created);
+    }
+
+    #[test]
+    fn closing_a_pending_tab_retains_its_cef_callbacks_until_close_finishes() {
+        let mut renderer = CefRenderer::new();
+        let tab_id = BrowserState::with_initial_url("example.com")
+            .active_page()
+            .tab_id;
+
+        renderer.tabs.insert(
+            tab_id,
+            CefTab {
+                browser: Rc::new(RefCell::new(BrowserSlot::default())),
+                _client: None,
+                loaded: LoadedPage {
+                    url: "https://example.com".to_string(),
+                    revision: 0,
+                    bounds: PhysicalRect {
+                        x: 0,
+                        y: 0,
+                        width: 800,
+                        height: 600,
+                    },
+                },
+            },
+        );
+
+        renderer.sync_tabs([]);
+
+        assert!(renderer.tabs.is_empty());
+        assert_eq!(renderer.closing_tabs.len(), 1);
+
+        finish_browser_close(&renderer.closing_tabs[0].browser);
+        renderer.sync_tabs([]);
+
+        assert!(renderer.closing_tabs.is_empty());
     }
 }
 
