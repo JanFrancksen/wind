@@ -1,3 +1,4 @@
+mod new_tab;
 mod placeholder;
 
 #[cfg(feature = "cef-renderer")]
@@ -66,7 +67,7 @@ impl PhysicalRect {
 
 pub struct BrowserRenderer {
     backend: RendererBackend,
-    new_tab: placeholder::NewTabScene,
+    new_tab: new_tab::NewTabScene,
 }
 
 enum RendererBackend {
@@ -79,7 +80,7 @@ impl BrowserRenderer {
     pub fn new(cef_available: bool) -> Self {
         Self {
             backend: RendererBackend::new_default(cef_available),
-            new_tab: placeholder::NewTabScene::new(),
+            new_tab: new_tab::NewTabScene::new(),
         }
     }
 
