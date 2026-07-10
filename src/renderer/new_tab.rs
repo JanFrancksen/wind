@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{collections::HashSet, time::Instant};
 
 use eframe::egui;
 use skia_safe::{
@@ -6,7 +6,7 @@ use skia_safe::{
 };
 
 use crate::{
-    browser::BrowserState,
+    browser::{BrowserState, TabId},
     ds::{components::SearchField, theming::Theme},
 };
 
@@ -17,6 +17,7 @@ pub struct NewTabScene {
     last_rendered_at: Option<Instant>,
     search_input: String,
     texture: Option<egui::TextureHandle>,
+    focused_tab_ids: HashSet<TabId>,
 }
 
 impl NewTabScene {
@@ -26,6 +27,7 @@ impl NewTabScene {
             last_rendered_at: None,
             search_input: String::new(),
             texture: None,
+            focused_tab_ids: HashSet::new(),
         }
     }
 
@@ -73,7 +75,10 @@ impl NewTabScene {
             );
         }
 
-        let submitted = paint_search(ui, rect, &mut self.search_input, theme);
+        // A new tab becomes active as soon as it is created. Request focus once for each tab
+        // rather than on every frame, so users can still move focus elsewhere on the page.
+        let autofocus = self.focused_tab_ids.insert(browser.active_tab().id);
+        let submitted = paint_search(ui, rect, &mut self.search_input, theme, autofocus);
         if submitted && !self.search_input.trim().is_empty() {
             browser.submit_address_input(&self.search_input);
             *address_input = browser.active_url_for_input();
@@ -89,7 +94,13 @@ const WIND_TUNNEL_MAX_WIDTH: f32 = 960.0;
 const WIND_TUNNEL_MAX_HEIGHT: f32 = 640.0;
 const SKY_BANDS: usize = 84;
 
-fn paint_search(ui: &mut egui::Ui, rect: egui::Rect, input: &mut String, theme: &Theme) -> bool {
+fn paint_search(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    input: &mut String,
+    theme: &Theme,
+    autofocus: bool,
+) -> bool {
     let mut submitted = false;
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.vertical_centered(|ui| {
@@ -103,6 +114,9 @@ fn paint_search(ui: &mut egui::Ui, rect: egui::Rect, input: &mut String, theme: 
             let search = SearchField::empty_page(input)
                 .desired_width(520.0)
                 .show(ui, theme);
+            if autofocus {
+                search.request_focus();
+            }
             submitted =
                 search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         });
