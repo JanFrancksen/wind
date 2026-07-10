@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct TabId(u64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +63,13 @@ impl BrowserState {
 
     pub fn tabs(&self) -> &[Tab] {
         &self.tabs
+    }
+
+    /// Stable identities for the tabs that still own renderer resources.
+    /// Their ordering is deliberately irrelevant: pinning and moving a tab must
+    /// not cause its native page to be recreated.
+    pub fn tab_ids(&self) -> impl Iterator<Item = TabId> + '_ {
+        self.tabs.iter().map(|tab| tab.id)
     }
 
     pub fn active_index(&self) -> usize {
@@ -516,5 +523,20 @@ mod tests {
         browser.toggle_pin_active_tab();
         assert!(!browser.tabs()[1].pinned);
         assert!(!browser.tabs()[1].highlighted);
+    }
+
+    #[test]
+    fn tab_id_survives_selection_and_reordering() {
+        let mut browser = BrowserState::with_initial_url("example.com");
+        let first = browser.active_page().tab_id;
+        browser.add_tab("rust-lang.org");
+        let second = browser.active_page().tab_id;
+
+        browser.select_tab(0);
+        assert_eq!(browser.active_page().tab_id, first);
+
+        browser.move_active_tab_down();
+        assert_eq!(browser.active_page().tab_id, first);
+        assert_eq!(browser.tab_ids().collect::<Vec<_>>(), vec![second, first]);
     }
 }

@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
     error::Error,
     fmt,
     rc::Rc,
@@ -12,7 +13,10 @@ use cef::sys::cef_window_handle_t;
 use cef::*;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-use crate::renderer::{PageTarget, PhysicalRect, RendererStatus};
+use crate::{
+    browser::TabId,
+    renderer::{PageTarget, PhysicalRect, RendererStatus},
+};
 
 pub struct CefRuntime {
     _library: CefLibrary,
@@ -228,16 +232,22 @@ fn load_cef_library() -> Result<CefLibrary, CefRuntimeError> {
 }
 
 pub struct CefRenderer {
-    browser: SharedBrowser,
     shortcuts: SharedShortcutBridge,
-    client: Option<Client>,
-    browser_requested: bool,
-    visible: bool,
-    loaded: Option<LoadedPage>,
+    tabs: HashMap<TabId, CefTab>,
+    active_tab: Option<TabId>,
+    surface_visible: bool,
 }
 
-type SharedBrowser = Rc<RefCell<Option<Browser>>>;
 type SharedShortcutBridge = Rc<ShortcutBridge>;
+
+#[derive(Default)]
+struct BrowserSlot {
+    browser: Option<Browser>,
+    visible: bool,
+    close_when_created: bool,
+}
+
+type SharedBrowser = Rc<RefCell<BrowserSlot>>;
 
 #[derive(Default)]
 struct ShortcutBridge {
@@ -265,15 +275,21 @@ struct LoadedPage {
     bounds: PhysicalRect,
 }
 
+struct CefTab {
+    browser: SharedBrowser,
+    // CEF retains callbacks through this client. Keep it alive for as long as
+    // the tab's native browser exists.
+    _client: Option<Client>,
+    loaded: LoadedPage,
+}
+
 impl CefRenderer {
     pub fn new() -> Self {
         Self {
-            browser: Rc::new(RefCell::new(None)),
             shortcuts: Rc::new(ShortcutBridge::default()),
-            client: None,
-            browser_requested: false,
-            visible: true,
-            loaded: None,
+            tabs: HashMap::new(),
+            active_tab: None,
+            surface_visible: true,
         }
     }
 
@@ -282,7 +298,9 @@ impl CefRenderer {
             return RendererStatus::UnsupportedUrl(target.page.url.clone());
         }
 
-        if self.current_browser().is_none() && !self.browser_requested {
+        self.set_active_tab(target.page.tab_id);
+
+        if !self.tabs.contains_key(&target.page.tab_id) {
             let parent = match native_window_handle(frame) {
                 Some(parent) => parent,
                 None => {
@@ -297,37 +315,44 @@ impl CefRenderer {
             }
         }
 
-        if self.current_browser().is_none() {
+        if self.current_browser(target.page.tab_id).is_none() {
             return RendererStatus::WaitingForNativeBrowser;
         }
 
-        self.sync_browser(target);
+        self.sync_browser(target.page.tab_id, target);
         RendererStatus::Ready
     }
 
     pub fn show(&mut self) {
-        self.set_window_visible(true);
+        self.surface_visible = true;
+        self.sync_visibility();
     }
 
     pub fn hide(&mut self) {
-        self.set_window_visible(false);
+        self.surface_visible = false;
+        self.sync_visibility();
     }
 
     pub fn focus(&mut self) {
-        if let Some(host) = self.current_browser().and_then(|browser| browser.host()) {
+        if let Some(host) = self
+            .active_tab
+            .and_then(|tab_id| self.current_browser(tab_id))
+            .and_then(|browser| browser.host())
+        {
             host.set_focus(1);
         }
     }
 
     pub fn shutdown(&mut self) {
-        if let Some(host) = self.current_browser().and_then(|browser| browser.host()) {
-            host.close_browser(1);
+        for tab in self.tabs.values() {
+            let browser = request_browser_close(&tab.browser);
+            if let Some(host) = browser.and_then(|browser| browser.host()) {
+                host.close_browser(1);
+            }
         }
 
-        *self.browser.borrow_mut() = None;
-        self.client = None;
-        self.browser_requested = false;
-        self.loaded = None;
+        self.tabs.clear();
+        self.active_tab = None;
     }
 
     pub fn tick(&mut self) {
@@ -343,12 +368,38 @@ impl CefRenderer {
         self.shortcuts.take_toggle_sidebar_request()
     }
 
+    pub fn sync_tabs(&mut self, tab_ids: impl IntoIterator<Item = TabId>) {
+        let live_tabs = tab_ids.into_iter().collect::<HashSet<_>>();
+        self.tabs.retain(|tab_id, tab| {
+            if live_tabs.contains(tab_id) {
+                return true;
+            }
+
+            let browser = request_browser_close(&tab.browser);
+            if let Some(host) = browser.and_then(|browser| browser.host()) {
+                host.close_browser(1);
+            }
+            false
+        });
+
+        if self
+            .active_tab
+            .is_some_and(|tab_id| !live_tabs.contains(&tab_id))
+        {
+            self.active_tab = None;
+        }
+    }
+
     fn create_browser(&mut self, parent: cef_window_handle_t, target: &PageTarget) -> bool {
         let bounds = cef_rect(target.bounds);
-        let window_info = WindowInfo::default().set_as_child(parent, &bounds);
+        let window_info = hidden_child_window_info(parent, &bounds);
         let settings = BrowserSettings::default();
         let url = CefString::from(target.page.url.as_str());
-        let mut client = WindCefClient::new(self.browser.clone(), self.shortcuts.clone());
+        // CEF creates this asynchronously. Start hidden so a newly-created
+        // background tab cannot flash before the next egui frame synchronizes
+        // the active tab's visibility.
+        let browser = Rc::new(RefCell::new(BrowserSlot::default()));
+        let mut client = WindCefClient::new(browser.clone(), self.shortcuts.clone());
         let created = browser_host_create_browser(
             Some(&window_info),
             Some(&mut client),
@@ -359,27 +410,33 @@ impl CefRenderer {
         ) == 1;
 
         if created {
-            self.client = Some(client);
-            self.browser_requested = true;
-            self.loaded = Some(LoadedPage {
-                url: target.page.url.clone(),
-                revision: target.page.render_revision,
-                bounds: target.bounds,
-            });
+            self.tabs.insert(
+                target.page.tab_id,
+                CefTab {
+                    browser,
+                    _client: Some(client),
+                    loaded: LoadedPage {
+                        url: target.page.url.clone(),
+                        revision: target.page.render_revision,
+                        bounds: target.bounds,
+                    },
+                },
+            );
         }
 
         created
     }
 
-    fn sync_browser(&mut self, target: &PageTarget) {
-        let Some(browser) = self.current_browser() else {
+    fn sync_browser(&mut self, tab_id: TabId, target: &PageTarget) {
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+            return;
+        };
+        let Some(browser) = tab.browser.borrow().browser.clone() else {
             return;
         };
 
-        let loaded = self.loaded.as_ref();
-        let should_load = loaded.map_or(true, |loaded| {
-            loaded.url != target.page.url || loaded.revision != target.page.render_revision
-        });
+        let should_load =
+            tab.loaded.url != target.page.url || tab.loaded.revision != target.page.render_revision;
 
         if should_load {
             if let Some(frame) = browser.main_frame() {
@@ -387,32 +444,51 @@ impl CefRenderer {
             }
         }
 
-        if loaded.map_or(true, |loaded| loaded.bounds != target.bounds) {
+        if tab.loaded.bounds != target.bounds {
             resize_child_window(&browser, target.bounds);
         }
 
-        self.loaded = Some(LoadedPage {
+        tab.loaded = LoadedPage {
             url: target.page.url.clone(),
             revision: target.page.render_revision,
             bounds: target.bounds,
-        });
+        };
     }
 
-    fn set_window_visible(&mut self, visible: bool) {
-        if self.visible == visible {
-            return;
-        }
-
-        self.visible = visible;
-
-        if let Some(browser) = self.current_browser() {
-            set_child_window_visible(&browser, visible);
+    fn set_active_tab(&mut self, tab_id: TabId) {
+        if self.active_tab != Some(tab_id) {
+            self.active_tab = Some(tab_id);
+            self.sync_visibility();
         }
     }
 
-    fn current_browser(&self) -> Option<Browser> {
-        self.browser.borrow().clone()
+    fn sync_visibility(&self) {
+        for (tab_id, tab) in &self.tabs {
+            let visible = should_show_tab(self.surface_visible, self.active_tab, *tab_id);
+            let browser = {
+                let mut slot = tab.browser.borrow_mut();
+                slot.visible = visible;
+                slot.browser.clone()
+            };
+            if let Some(browser) = browser {
+                set_child_window_visible(&browser, visible);
+            }
+        }
     }
+
+    fn current_browser(&self, tab_id: TabId) -> Option<Browser> {
+        self.tabs.get(&tab_id)?.browser.borrow().browser.clone()
+    }
+}
+
+fn request_browser_close(slot: &SharedBrowser) -> Option<Browser> {
+    let mut slot = slot.borrow_mut();
+    slot.close_when_created = true;
+    slot.browser.clone()
+}
+
+fn should_show_tab(surface_visible: bool, active_tab: Option<TabId>, tab_id: TabId) -> bool {
+    surface_visible && active_tab == Some(tab_id)
 }
 
 wrap_app! {
@@ -468,7 +544,22 @@ wrap_life_span_handler! {
 
     impl LifeSpanHandler {
         fn on_after_created(&self, browser: Option<&mut Browser>) {
-            *self.browser.borrow_mut() = browser.cloned();
+            let Some(browser) = browser.cloned() else {
+                return;
+            };
+            let (visible, close_when_created) = {
+                let mut slot = self.browser.borrow_mut();
+                slot.browser = Some(browser.clone());
+                (slot.visible, slot.close_when_created)
+            };
+
+            if close_when_created {
+                if let Some(host) = browser.host() {
+                    host.close_browser(1);
+                }
+            } else {
+                set_child_window_visible(&browser, visible);
+            }
         }
     }
 }
@@ -480,6 +571,23 @@ fn cef_rect(bounds: PhysicalRect) -> Rect {
         width: bounds.width,
         height: bounds.height,
     }
+}
+
+fn hidden_child_window_info(parent: cef_window_handle_t, bounds: &Rect) -> WindowInfo {
+    let mut window_info = WindowInfo::default().set_as_child(parent, bounds);
+
+    // CEF makes child windows visible by default. Keep a new view hidden until
+    // its lifecycle callback applies the owning tab's visibility state.
+    #[cfg(target_os = "macos")]
+    {
+        window_info.hidden = 1;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        window_info.style &= !windows_sys::Win32::UI::WindowsAndMessaging::WS_VISIBLE;
+    }
+
+    window_info
 }
 
 fn is_toggle_sidebar_shortcut(event: &KeyEvent) -> bool {
@@ -505,6 +613,7 @@ fn is_toggle_sidebar_shortcut(event: &KeyEvent) -> bool {
 #[cfg(test)]
 mod shortcut_tests {
     use super::*;
+    use crate::browser::BrowserState;
 
     #[test]
     fn command_s_from_the_focused_browser_is_an_app_shortcut() {
@@ -534,6 +643,27 @@ mod shortcut_tests {
 
         assert!(shortcuts.take_toggle_sidebar_request());
         assert!(!shortcuts.take_toggle_sidebar_request());
+    }
+
+    #[test]
+    fn only_the_active_tab_is_visible_in_the_native_surface() {
+        let mut tabs = BrowserState::with_initial_url("example.com");
+        let first = tabs.active_page().tab_id;
+        tabs.add_tab("rust-lang.org");
+        let second = tabs.active_page().tab_id;
+
+        assert!(should_show_tab(true, Some(second), second));
+        assert!(!should_show_tab(true, Some(second), first));
+        assert!(!should_show_tab(false, Some(second), second));
+    }
+
+    #[test]
+    fn pending_browser_starts_hidden_and_can_be_closed_before_creation() {
+        let slot = Rc::new(RefCell::new(BrowserSlot::default()));
+
+        assert!(!slot.borrow().visible);
+        assert!(request_browser_close(&slot).is_none());
+        assert!(slot.borrow().close_when_created);
     }
 }
 

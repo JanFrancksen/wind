@@ -93,6 +93,7 @@ impl BrowserRenderer {
         rect: egui::Rect,
     ) {
         self.backend.set_repaint_context(ui.ctx());
+        self.backend.sync_tabs(browser.tab_ids());
         let response = ui.interact(
             rect,
             egui::Id::new("wind_browser_surface"),
@@ -172,6 +173,13 @@ impl RendererBackend {
             Self::Placeholder(_) => false,
             #[cfg(feature = "cef-renderer")]
             Self::Cef(renderer) => renderer.take_toggle_sidebar_request(),
+        }
+    }
+
+    fn sync_tabs(&mut self, tab_ids: impl IntoIterator<Item = crate::browser::TabId>) {
+        #[cfg(feature = "cef-renderer")]
+        if let Self::Cef(renderer) = self {
+            renderer.sync_tabs(tab_ids);
         }
     }
 
