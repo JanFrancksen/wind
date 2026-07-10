@@ -18,10 +18,14 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target_directory="$(dirname "$app_binary")"
 bundle="$target_directory/bundle/wind.app"
 inputs_file="$bundle/Contents/Resources/.wind-cef-inputs"
-profile_args=()
-if [[ "$(basename "$target_directory")" == "release" ]]; then
-  profile_args=(--release)
-fi
+
+build_binary() {
+  if [[ "$(basename "$target_directory")" == "release" ]]; then
+    cargo build --release --bin "$1"
+  else
+    cargo build --bin "$1"
+  fi
+}
 
 bundle_inputs() {
   shasum "$repository_root/Cargo.toml" "$repository_root/Cargo.lock"
@@ -45,8 +49,8 @@ if "$needs_bundle"; then
   echo "Preparing the CEF app bundle..."
   (
     cd "$repository_root"
-    cargo build "${profile_args[@]}" --bin wind_helper
-    cargo build "${profile_args[@]}" --bin bundle_wind
+    build_binary wind_helper
+    build_binary bundle_wind
     "$target_directory/bundle_wind"
   )
 
@@ -55,7 +59,7 @@ if "$needs_bundle"; then
 else
   (
     cd "$repository_root"
-    cargo build "${profile_args[@]}" --bin wind_helper
+    build_binary wind_helper
   )
 
   cp -f "$app_binary" "$bundle/Contents/MacOS/wind"
