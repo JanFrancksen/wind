@@ -1,4 +1,9 @@
-use std::{cell::RefCell, error::Error, fmt, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    error::Error,
+    fmt,
+    rc::Rc,
+};
 
 #[cfg(target_os = "macos")]
 use std::{ffi::CString, os::unix::ffi::OsStrExt, path::PathBuf};
@@ -224,6 +229,7 @@ fn load_cef_library() -> Result<CefLibrary, CefRuntimeError> {
 
 pub struct CefRenderer {
     browser: SharedBrowser,
+    shortcuts: SharedShortcutBridge,
     client: Option<Client>,
     browser_requested: bool,
     visible: bool,
@@ -231,6 +237,26 @@ pub struct CefRenderer {
 }
 
 type SharedBrowser = Rc<RefCell<Option<Browser>>>;
+type SharedShortcutBridge = Rc<ShortcutBridge>;
+
+#[derive(Default)]
+struct ShortcutBridge {
+    toggle_sidebar_requested: Cell<bool>,
+    repaint_context: RefCell<Option<eframe::egui::Context>>,
+}
+
+impl ShortcutBridge {
+    fn request_toggle_sidebar(&self) {
+        self.toggle_sidebar_requested.set(true);
+        if let Some(context) = self.repaint_context.borrow().as_ref() {
+            context.request_repaint();
+        }
+    }
+
+    fn take_toggle_sidebar_request(&self) -> bool {
+        self.toggle_sidebar_requested.replace(false)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LoadedPage {
@@ -243,6 +269,7 @@ impl CefRenderer {
     pub fn new() -> Self {
         Self {
             browser: Rc::new(RefCell::new(None)),
+            shortcuts: Rc::new(ShortcutBridge::default()),
             client: None,
             browser_requested: false,
             visible: true,
@@ -308,12 +335,20 @@ impl CefRenderer {
         do_message_loop_work();
     }
 
+    pub fn set_repaint_context(&self, context: &eframe::egui::Context) {
+        *self.shortcuts.repaint_context.borrow_mut() = Some(context.clone());
+    }
+
+    pub fn take_toggle_sidebar_request(&self) -> bool {
+        self.shortcuts.take_toggle_sidebar_request()
+    }
+
     fn create_browser(&mut self, parent: cef_window_handle_t, target: &PageTarget) -> bool {
         let bounds = cef_rect(target.bounds);
         let window_info = WindowInfo::default().set_as_child(parent, &bounds);
         let settings = BrowserSettings::default();
         let url = CefString::from(target.page.url.as_str());
-        let mut client = WindCefClient::new(self.browser.clone());
+        let mut client = WindCefClient::new(self.browser.clone(), self.shortcuts.clone());
         let created = browser_host_create_browser(
             Some(&window_info),
             Some(&mut client),
@@ -389,11 +424,39 @@ wrap_app! {
 wrap_client! {
     struct WindCefClient {
         browser: SharedBrowser,
+        shortcuts: SharedShortcutBridge,
     }
 
     impl Client {
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
             Some(WindLifeSpanHandler::new(self.browser.clone()))
+        }
+
+        fn keyboard_handler(&self) -> Option<KeyboardHandler> {
+            Some(WindKeyboardHandler::new(self.shortcuts.clone()))
+        }
+    }
+}
+
+wrap_keyboard_handler! {
+    struct WindKeyboardHandler {
+        shortcuts: SharedShortcutBridge,
+    }
+
+    impl KeyboardHandler {
+        fn on_pre_key_event(
+            &self,
+            _browser: Option<&mut Browser>,
+            event: Option<&KeyEvent>,
+            _os_event: *mut u8,
+            _is_keyboard_shortcut: Option<&mut std::os::raw::c_int>,
+        ) -> std::os::raw::c_int {
+            if event.is_some_and(is_toggle_sidebar_shortcut) {
+                self.shortcuts.request_toggle_sidebar();
+                return 1;
+            }
+
+            0
         }
     }
 }
@@ -416,6 +479,61 @@ fn cef_rect(bounds: PhysicalRect) -> Rect {
         y: bounds.y,
         width: bounds.width,
         height: bounds.height,
+    }
+}
+
+fn is_toggle_sidebar_shortcut(event: &KeyEvent) -> bool {
+    #[cfg(target_os = "linux")]
+    let is_key_down = event.type_ == KeyEventType::KEYDOWN;
+    #[cfg(not(target_os = "linux"))]
+    let is_key_down = event.type_ == KeyEventType::RAWKEYDOWN;
+
+    #[cfg(target_os = "macos")]
+    let command_flag = cef::sys::cef_event_flags_t::EVENTFLAG_COMMAND_DOWN.0;
+    #[cfg(not(target_os = "macos"))]
+    let command_flag = cef::sys::cef_event_flags_t::EVENTFLAG_CONTROL_DOWN.0;
+
+    let excluded_modifiers = cef::sys::cef_event_flags_t::EVENTFLAG_SHIFT_DOWN.0
+        | cef::sys::cef_event_flags_t::EVENTFLAG_ALT_DOWN.0;
+
+    is_key_down
+        && event.windows_key_code == i32::from(b'S')
+        && event.modifiers & command_flag != 0
+        && event.modifiers & excluded_modifiers == 0
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn command_s_from_the_focused_browser_is_an_app_shortcut() {
+        let event = KeyEvent {
+            type_: KeyEventType::RAWKEYDOWN,
+            modifiers: cef::sys::cef_event_flags_t::EVENTFLAG_COMMAND_DOWN.0,
+            windows_key_code: i32::from(b'S'),
+            ..Default::default()
+        };
+
+        assert!(is_toggle_sidebar_shortcut(&event));
+    }
+
+    #[test]
+    fn focused_browser_shortcut_queues_one_sidebar_toggle() {
+        let shortcuts = ShortcutBridge::default();
+        let event = KeyEvent {
+            type_: KeyEventType::RAWKEYDOWN,
+            modifiers: cef::sys::cef_event_flags_t::EVENTFLAG_COMMAND_DOWN.0,
+            windows_key_code: i32::from(b'S'),
+            ..Default::default()
+        };
+
+        if is_toggle_sidebar_shortcut(&event) {
+            shortcuts.request_toggle_sidebar();
+        }
+
+        assert!(shortcuts.take_toggle_sidebar_request());
+        assert!(!shortcuts.take_toggle_sidebar_request());
     }
 }
 
@@ -466,13 +584,101 @@ fn set_child_window_visible(_browser: &Browser, _visible: bool) {}
 
 #[cfg(target_os = "macos")]
 mod platform {
+    use std::ptr::NonNull;
+
     use cef::sys::cef_window_handle_t;
+    use objc2_app_kit::NSView;
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
 
     use crate::renderer::PhysicalRect;
 
-    pub fn resize_window(_window: cef_window_handle_t, _bounds: PhysicalRect) {}
+    pub fn resize_window(window: cef_window_handle_t, bounds: PhysicalRect) {
+        let Some(view) = ns_view(window) else {
+            return;
+        };
+        // SAFETY: CEF owns the NSView for the lifetime of this browser host,
+        // and resizing runs synchronously while that host is alive.
+        let view = unsafe { view.as_ref() };
+        // CEF exposes its native child as an NSView. Egui coordinates are
+        // top-left based, while an AppKit parent may be bottom-left based.
+        let Some(parent) = (unsafe { view.superview() }) else {
+            return;
+        };
+        let frame = appkit_frame(bounds, parent.bounds(), parent.isFlipped());
+        view.setFrame(frame);
+    }
 
-    pub fn set_window_visible(_window: cef_window_handle_t, _visible: bool) {}
+    pub fn set_window_visible(window: cef_window_handle_t, visible: bool) {
+        if let Some(view) = ns_view(window) {
+            // SAFETY: CEF owns the NSView for the lifetime of this browser host,
+            // and visibility updates run synchronously while that host is alive.
+            let view = unsafe { view.as_ref() };
+            view.setHidden(!visible);
+        }
+    }
+
+    fn ns_view(window: cef_window_handle_t) -> Option<NonNull<NSView>> {
+        // CEF documents cef_window_handle_t as an NSView pointer on macOS.
+        NonNull::new(window.cast::<NSView>())
+    }
+
+    fn appkit_frame(bounds: PhysicalRect, parent_bounds: NSRect, parent_flipped: bool) -> NSRect {
+        let x = parent_bounds.origin.x + f64::from(bounds.x);
+        let y = if parent_flipped {
+            parent_bounds.origin.y + f64::from(bounds.y)
+        } else {
+            parent_bounds.origin.y + parent_bounds.size.height - f64::from(bounds.y + bounds.height)
+        };
+        NSRect::new(
+            NSPoint::new(x, y),
+            NSSize::new(f64::from(bounds.width), f64::from(bounds.height)),
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn converts_top_left_browser_bounds_for_an_unflipped_parent() {
+            let parent = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1200.0, 800.0));
+            let frame = appkit_frame(
+                PhysicalRect {
+                    x: 280,
+                    y: 40,
+                    width: 920,
+                    height: 760,
+                },
+                parent,
+                false,
+            );
+
+            assert_eq!(
+                frame,
+                NSRect::new(NSPoint::new(280.0, 0.0), NSSize::new(920.0, 760.0))
+            );
+        }
+
+        #[test]
+        fn preserves_top_left_browser_bounds_for_a_flipped_parent() {
+            let parent = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1200.0, 800.0));
+            let frame = appkit_frame(
+                PhysicalRect {
+                    x: 0,
+                    y: 40,
+                    width: 1200,
+                    height: 760,
+                },
+                parent,
+                true,
+            );
+
+            assert_eq!(
+                frame,
+                NSRect::new(NSPoint::new(0.0, 40.0), NSSize::new(1200.0, 760.0))
+            );
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]

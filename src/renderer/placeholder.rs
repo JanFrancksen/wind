@@ -116,9 +116,7 @@ impl NewTabScene {
 const WIND_TUNNEL_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
 const WIND_TUNNEL_MAX_WIDTH: f32 = 960.0;
 const WIND_TUNNEL_MAX_HEIGHT: f32 = 640.0;
-const TWILIGHT_BANDS: usize = 72;
-const AURORA_RIBBONS: usize = 7;
-const STAR_COUNT: usize = 84;
+const SKY_BANDS: usize = 84;
 pub fn paint_status(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -188,10 +186,8 @@ fn render_wind_tunnel(size: egui::Vec2, time: f32, pointer: egui::Pos2) -> egui:
     let canvas = surface.canvas();
     let bounds = Rect::from_wh(width as f32, height as f32);
 
-    paint_twilight(canvas, bounds);
-    paint_contours(canvas, bounds, time, pointer);
-    paint_aurora(canvas, bounds, time, pointer);
-    paint_stars(canvas, bounds, time);
+    paint_logo_sky(canvas, bounds);
+    paint_logo_folds(canvas, bounds, time, pointer);
 
     let info = ImageInfo::new(
         (width, height),
@@ -204,12 +200,14 @@ fn render_wind_tunnel(size: egui::Vec2, time: f32, pointer: egui::Pos2) -> egui:
     egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &pixels)
 }
 
-fn paint_twilight(canvas: &skia_safe::Canvas, bounds: Rect) {
-    for band in 0..TWILIGHT_BANDS {
-        let t = band as f32 / (TWILIGHT_BANDS - 1) as f32;
-        let r = (7.0 + 6.0 * t) as u8;
-        let g = (15.0 + 20.0 * t) as u8;
-        let b = (31.0 + 28.0 * t) as u8;
+fn paint_logo_sky(canvas: &skia_safe::Canvas, bounds: Rect) {
+    // The backdrop deliberately stays almost white at the horizon. It gives the blue folds
+    // somewhere to breathe, matching the generous negative space in the Wind mark.
+    for band in 0..SKY_BANDS {
+        let t = band as f32 / (SKY_BANDS - 1) as f32;
+        let r = (224.0 - 53.0 * t) as u8;
+        let g = (230.0 - 42.0 * t) as u8;
+        let b = (250.0 - 16.0 * t) as u8;
         let mut paint = Paint::default();
         paint.set_color(Color::from_argb(255, r, g, b));
         canvas.draw_rect(
@@ -217,96 +215,156 @@ fn paint_twilight(canvas: &skia_safe::Canvas, bounds: Rect) {
                 0.0,
                 bounds.height() * t,
                 bounds.width(),
-                bounds.height() / TWILIGHT_BANDS as f32 + 1.0,
+                bounds.height() / SKY_BANDS as f32 + 1.0,
             ),
             &paint,
         );
     }
+
+    // Soft, hand-painted light behind the crest. Drawing concentric translucent circles is
+    // cheaper than a full-resolution blur but retains the same diffused highlight once egui
+    // scales the texture.
+    paint_soft_glow(
+        canvas,
+        Point::new(bounds.width() * 0.48, bounds.height() * 0.30),
+        bounds.width() * 0.38,
+        Color::from_argb(11, 255, 255, 255),
+    );
+    paint_soft_glow(
+        canvas,
+        Point::new(bounds.width() * 0.90, bounds.height() * 0.64),
+        bounds.width() * 0.19,
+        Color::from_argb(13, 232, 239, 255),
+    );
 }
 
-fn paint_contours(canvas: &skia_safe::Canvas, bounds: Rect, time: f32, pointer: egui::Pos2) {
-    let drift = (pointer.x - 0.5) * 38.0;
-    for row in 0..17 {
-        let y = bounds.height() * (0.26 + row as f32 * 0.056);
-        let mut path = PathBuilder::new();
-        path.move_to(Point::new(-20.0, y));
-        for segment in 0..8 {
-            let x = segment as f32 * bounds.width() / 7.0;
-            let crest = y
-                + (time * 0.45 + row as f32 * 0.61 + segment as f32).sin() * 10.0
-                + drift * (segment as f32 / 7.0 - 0.5);
-            path.cubic_to(
-                Point::new(x + bounds.width() * 0.04, crest - 9.0),
-                Point::new(x + bounds.width() * 0.10, crest + 9.0),
-                Point::new(x + bounds.width() / 7.0, crest),
-            );
-        }
-        let path = path.detach();
+fn paint_logo_folds(canvas: &skia_safe::Canvas, bounds: Rect, time: f32, pointer: egui::Pos2) {
+    let w = bounds.width();
+    let h = bounds.height();
+    // One shared vanishing point makes the nested curves read as material folding over itself.
+    // Motion is intentionally sub-pixel-ish: it should feel alive, never like an aurora.
+    let breathe = (time * 0.32).sin();
+    let focus = Point::new(
+        w * (0.90 + (pointer.x - 0.5) * 0.018),
+        h * (0.70 + breathe * 0.009 + (pointer.y - 0.5) * 0.012),
+    );
+
+    paint_fold(
+        canvas,
+        bounds,
+        focus,
+        0.31,
+        0.47,
+        Color::from_argb(255, 145, 162, 231),
+    );
+    paint_fold(
+        canvas,
+        bounds,
+        focus,
+        0.47,
+        0.63,
+        Color::from_argb(255, 112, 135, 221),
+    );
+    paint_fold(
+        canvas,
+        bounds,
+        focus,
+        0.63,
+        0.84,
+        Color::from_argb(255, 73, 99, 196),
+    );
+
+    // A few broad, transparent strokes provide the pearlescent light at each fold's edge.
+    for (start, alpha, width) in [(0.31, 24, 36.0), (0.47, 22, 28.0), (0.63, 18, 22.0)] {
+        let mut edge = PathBuilder::new();
+        edge.move_to(Point::new(-w * 0.08, h * start));
+        edge.cubic_to(
+            Point::new(w * 0.30, h * (start - 0.16)),
+            Point::new(w * 0.57, h * (start - 0.13)),
+            focus,
+        );
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         paint.set_style(PaintStyle::Stroke);
-        paint.set_stroke_width(0.75);
-        paint.set_color(Color::from_argb(20, 142, 230, 207));
-        canvas.draw_path(&path, &paint);
+        paint.set_stroke_width(width);
+        paint.set_color(Color::from_argb(alpha, 244, 247, 255));
+        canvas.draw_path(&edge.detach(), &paint);
     }
-}
 
-fn paint_aurora(canvas: &skia_safe::Canvas, bounds: Rect, time: f32, pointer: egui::Pos2) {
-    let pointer_pull = (pointer.y - 0.5) * 52.0;
-    for ribbon in 0..AURORA_RIBBONS {
-        let phase = time * (0.34 + ribbon as f32 * 0.025) + ribbon as f32 * 0.91;
-        let base_y = bounds.height() * (0.36 + ribbon as f32 * 0.045) + pointer_pull;
-        let mut path = PathBuilder::new();
-        path.move_to(Point::new(-40.0, base_y));
-        for section in 0..7 {
-            let x = section as f32 * bounds.width() / 6.0;
-            let wave = phase.sin() * 35.0
-                + (phase * 1.7 + section as f32 * 0.9).cos() * 22.0
-                + (pointer.x - 0.5) * 70.0 * (section as f32 / 6.0);
-            path.cubic_to(
-                Point::new(x + bounds.width() * 0.06, base_y + wave * 1.15),
-                Point::new(x + bounds.width() * 0.11, base_y - wave * 0.55),
-                Point::new(x + bounds.width() / 6.0, base_y + wave),
-            );
-        }
-
-        let path = path.detach();
-        for (width, alpha) in [(46.0, 10), (24.0, 21), (8.0, 68), (2.0, 175)] {
-            let mut paint = Paint::default();
-            paint.set_anti_alias(true);
-            paint.set_style(PaintStyle::Stroke);
-            paint.set_stroke_width(width);
-            let color = if ribbon % 2 == 0 {
-                Color::from_argb(alpha, 83, 255, 196)
-            } else {
-                Color::from_argb(alpha, 78, 179, 255)
-            };
-            paint.set_color(color);
-            canvas.draw_path(&path, &paint);
-        }
-    }
-}
-
-fn paint_stars(canvas: &skia_safe::Canvas, bounds: Rect, time: f32) {
+    let mut foreground = PathBuilder::new();
+    foreground.move_to(Point::new(-w * 0.03, h * 1.05));
+    foreground.cubic_to(
+        Point::new(w * 0.12, h * 0.82),
+        Point::new(w * 0.15, h * 0.54),
+        Point::new(w * 0.45, h * 0.45),
+    );
+    foreground.cubic_to(
+        Point::new(w * 0.66, h * 0.38),
+        Point::new(w * 0.78, h * 0.55),
+        focus,
+    );
+    foreground.cubic_to(
+        Point::new(w * 0.96, h * 0.83),
+        Point::new(w * 1.03, h * 0.79),
+        Point::new(w * 1.03, h * 0.79),
+    );
+    foreground.line_to(Point::new(w * 1.03, h * 1.05));
+    foreground.close();
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    for index in 0..STAR_COUNT {
-        let seed = index as f32 * 12.9898;
-        let x = fract(seed.sin() * 43_758.547) * bounds.width();
-        let y = fract((seed + 1.0).cos() * 18_293.64) * bounds.height() * 0.63;
-        let pulse = ((time * 1.6 + seed).sin() + 1.0) * 0.5;
-        paint.set_color(Color::from_argb(
-            (35.0 + pulse * 110.0) as u8,
-            205,
-            245,
-            240,
-        ));
-        canvas.draw_circle(Point::new(x, y), 0.45 + pulse * 0.9, &paint);
-    }
+    paint.set_color(Color::from_argb(255, 5, 13, 40));
+    canvas.draw_path(&foreground.detach(), &paint);
+
+    paint_soft_glow(
+        canvas,
+        Point::new(w * 0.88, h * 0.70),
+        w * 0.07,
+        Color::from_argb(18, 126, 148, 255),
+    );
 }
 
-fn fract(value: f32) -> f32 {
-    value - value.floor()
+fn paint_fold(
+    canvas: &skia_safe::Canvas,
+    bounds: Rect,
+    focus: Point,
+    upper: f32,
+    lower: f32,
+    color: Color,
+) {
+    let w = bounds.width();
+    let h = bounds.height();
+    let mut path = PathBuilder::new();
+    path.move_to(Point::new(-w * 0.08, h * upper));
+    path.cubic_to(
+        Point::new(w * 0.28, h * (upper - 0.17)),
+        Point::new(w * 0.59, h * (upper - 0.12)),
+        focus,
+    );
+    path.cubic_to(
+        Point::new(w * 0.72, h * (lower - 0.02)),
+        Point::new(w * 0.32, h * (lower - 0.04)),
+        Point::new(-w * 0.08, h * lower),
+    );
+    path.close();
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(color);
+    canvas.draw_path(&path.detach(), &paint);
+}
+
+fn paint_soft_glow(canvas: &skia_safe::Canvas, center: Point, radius: f32, color: Color) {
+    for step in (1..=20).rev() {
+        let t = step as f32 / 20.0;
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(Color::from_argb(
+            ((color.a() as f32) * (1.0 - t).powf(1.7)) as u8,
+            color.r(),
+            color.g(),
+            color.b(),
+        ));
+        canvas.draw_circle(center, radius * t, &paint);
+    }
 }
 
 fn paint_mountains(ui: &mut egui::Ui, rect: egui::Rect, theme: &Theme) {

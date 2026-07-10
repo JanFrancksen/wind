@@ -17,17 +17,22 @@ pub fn show_root(
     sidebar_width: &mut f32,
     sidebar_collapsed: &mut bool,
 ) {
-    let available = ui.available_size();
-    let full_rect = ui.max_rect();
+    // Respect any chrome already allocated by the parent UI. This remains the
+    // complete root rect today and automatically becomes the space below a
+    // future top navbar.
+    let full_rect = ui.available_rect_before_wrap();
     paint_app_backdrop(ui, full_rect, theme);
+    if renderer.take_toggle_sidebar_request() {
+        *sidebar_collapsed = !*sidebar_collapsed;
+    }
     handle_sidebar_shortcut(ui, sidebar_collapsed);
 
     let resize_handle_width = 8.0;
     let min_sidebar_width = 224.0;
     let min_content_width = 320.0;
-    let max_sidebar_width = (available.x - min_content_width)
+    let max_sidebar_width = (full_rect.width() - min_content_width)
         .max(min_sidebar_width)
-        .min(available.x * 0.68);
+        .min(full_rect.width() * 0.68);
     *sidebar_width = sidebar_width.clamp(min_sidebar_width, max_sidebar_width);
     let sidebar_progress = ui.ctx().animate_bool_with_time_and_easing(
         egui::Id::new("wind_sidebar_expanded"),
@@ -36,14 +41,7 @@ pub fn show_root(
         egui::emath::easing::sin_in_out,
     );
     let sidebar_width_for_layout = *sidebar_width * sidebar_progress;
-    let sidebar_rect = egui::Rect::from_min_size(
-        full_rect.min,
-        egui::vec2(sidebar_width_for_layout, available.y),
-    );
-    let content_rect = egui::Rect::from_min_max(
-        egui::pos2(sidebar_rect.right(), full_rect.top()),
-        full_rect.right_bottom(),
-    );
+    let layout = RootLayout::new(full_rect, sidebar_width_for_layout);
 
     if sidebar_width_for_layout > 0.5 {
         show_animated_sidebar(
@@ -53,40 +51,49 @@ pub fn show_root(
             theme,
             sidebar_collapsed,
             SidebarAnimation {
-                layout_width: sidebar_width_for_layout,
-                height: available.y,
+                rect: layout.sidebar,
             },
         );
     }
 
-    show_content_surface(
-        ui,
-        frame,
-        browser,
-        renderer,
-        address_input,
-        theme,
-        content_rect,
-    );
+    renderer.show_in_rect(ui, frame, browser, address_input, theme, layout.content);
 
     if sidebar_progress > 0.98 {
         invisible_sidebar_resize_handle(
             ui,
-            sidebar_rect.right(),
+            layout.sidebar.right(),
             full_rect.top(),
             sidebar_width,
             min_sidebar_width,
             max_sidebar_width,
             resize_handle_width,
-            available.y,
+            full_rect.height(),
         );
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RootLayout {
+    sidebar: egui::Rect,
+    content: egui::Rect,
+}
+
+impl RootLayout {
+    fn new(full_rect: egui::Rect, sidebar_width: f32) -> Self {
+        let split_x = (full_rect.left() + sidebar_width).clamp(full_rect.left(), full_rect.right());
+        Self {
+            sidebar: egui::Rect::from_min_max(
+                full_rect.min,
+                egui::pos2(split_x, full_rect.bottom()),
+            ),
+            content: egui::Rect::from_min_max(egui::pos2(split_x, full_rect.top()), full_rect.max),
+        }
     }
 }
 
 #[derive(Clone, Copy)]
 struct SidebarAnimation {
-    layout_width: f32,
-    height: f32,
+    rect: egui::Rect,
 }
 
 fn show_animated_sidebar(
@@ -97,14 +104,8 @@ fn show_animated_sidebar(
     sidebar_collapsed: &mut bool,
     animation: SidebarAnimation,
 ) {
-    let clip_rect = egui::Rect::from_min_size(
-        ui.max_rect().min,
-        egui::vec2(animation.layout_width, animation.height),
-    );
-    let content_rect = egui::Rect::from_min_size(
-        clip_rect.min,
-        egui::vec2(animation.layout_width, animation.height),
-    );
+    let clip_rect = animation.rect;
+    let content_rect = animation.rect;
 
     let mut sidebar_ui = ui.new_child(
         egui::UiBuilder::new()
@@ -117,37 +118,11 @@ fn show_animated_sidebar(
         // width from its outer rect; forcing the full sidebar width here made the
         // children overflow into those margins and get clipped at the right edge.
         let vertical_margin = theme.tokens.primitive.space.lg * 2.0;
-        ui.set_min_height((animation.height - vertical_margin).max(0.0));
+        ui.set_min_height((animation.rect.height() - vertical_margin).max(0.0));
         if sidebar::show(ui, browser, address_input, theme, sidebar_collapsed) {
             *theme = theme.toggled();
         }
     });
-}
-
-fn show_content_surface(
-    ui: &mut egui::Ui,
-    frame: &mut eframe::Frame,
-    browser: &mut BrowserState,
-    renderer: &mut BrowserRenderer,
-    address_input: &mut String,
-    theme: &Theme,
-    rect: egui::Rect,
-) {
-    let mut content_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    content_ui.set_clip_rect(rect);
-    content_ui.set_min_size(rect.size());
-    show_browser_surface(
-        &mut content_ui,
-        frame,
-        browser,
-        renderer,
-        address_input,
-        theme,
-    );
 }
 
 fn handle_sidebar_shortcut(ui: &mut egui::Ui, sidebar_collapsed: &mut bool) {
@@ -235,13 +210,27 @@ fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     )
 }
 
-fn show_browser_surface(
-    ui: &mut egui::Ui,
-    frame: &mut eframe::Frame,
-    browser: &mut BrowserState,
-    renderer: &mut BrowserRenderer,
-    address_input: &mut String,
-    theme: &Theme,
-) {
-    renderer.show(ui, frame, browser, address_input, theme);
+#[cfg(test)]
+mod tests {
+    use super::RootLayout;
+    use eframe::egui;
+
+    #[test]
+    fn browser_occupies_everything_after_the_sidebar() {
+        let full = egui::Rect::from_min_max(egui::pos2(12.0, 36.0), egui::pos2(1212.0, 836.0));
+        let layout = RootLayout::new(full, 282.0);
+
+        assert_eq!(layout.sidebar.width(), 282.0);
+        assert_eq!(layout.content.min, egui::pos2(294.0, 36.0));
+        assert_eq!(layout.content.max, full.max);
+    }
+
+    #[test]
+    fn browser_occupies_the_full_root_when_sidebar_is_hidden() {
+        let full = egui::Rect::from_min_max(egui::pos2(12.0, 36.0), egui::pos2(1212.0, 836.0));
+        let layout = RootLayout::new(full, 0.0);
+
+        assert_eq!(layout.sidebar.width(), 0.0);
+        assert_eq!(layout.content, full);
+    }
 }

@@ -83,16 +83,21 @@ impl BrowserRenderer {
         }
     }
 
-    pub fn show(
+    pub fn show_in_rect(
         &mut self,
         ui: &mut egui::Ui,
         frame: &mut eframe::Frame,
         browser: &mut BrowserState,
         address_input: &mut String,
         theme: &Theme,
+        rect: egui::Rect,
     ) {
-        let available = ui.available_size();
-        let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click());
+        self.backend.set_repaint_context(ui.ctx());
+        let response = ui.interact(
+            rect,
+            egui::Id::new("wind_browser_surface"),
+            egui::Sense::click(),
+        );
         if browser.active_tab().url == "arc://new-tab" {
             self.backend.hide();
             self.new_tab.paint(ui, rect, browser, address_input, theme);
@@ -122,6 +127,10 @@ impl BrowserRenderer {
     pub fn tick(&mut self) {
         self.backend.tick();
     }
+
+    pub fn take_toggle_sidebar_request(&mut self) -> bool {
+        self.backend.take_toggle_sidebar_request()
+    }
 }
 
 impl Default for BrowserRenderer {
@@ -148,6 +157,21 @@ impl RendererBackend {
             Self::Placeholder(renderer) => renderer.render(frame, target),
             #[cfg(feature = "cef-renderer")]
             Self::Cef(renderer) => renderer.render(frame, target),
+        }
+    }
+
+    fn set_repaint_context(&mut self, _context: &egui::Context) {
+        #[cfg(feature = "cef-renderer")]
+        if let Self::Cef(renderer) = self {
+            renderer.set_repaint_context(_context);
+        }
+    }
+
+    fn take_toggle_sidebar_request(&mut self) -> bool {
+        match self {
+            Self::Placeholder(_) => false,
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.take_toggle_sidebar_request(),
         }
     }
 
