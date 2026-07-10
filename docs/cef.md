@@ -16,6 +16,17 @@ bundle is recreated when its Cargo inputs, CEF source path, or assets change.
 To deliberately rebuild the bundle, remove `target/debug/bundle/wind.app` and
 run `cargo run` again.
 
+CEF subprocesses require a real Apple development signature on recent macOS
+releases. Configure one before running locally (find its exact name with
+`security find-identity -v -p codesigning`):
+
+```sh
+export WIND_CODESIGN_IDENTITY='Apple Development: Your Name (TEAMID)'
+```
+
+Without a valid identity, Wind falls back to an ad-hoc signature and Chromium
+may log a process-signature validation error.
+
 The placeholder renderer is only available for quick shell work with:
 
 ```sh

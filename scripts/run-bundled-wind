@@ -18,6 +18,7 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target_directory="$(dirname "$app_binary")"
 bundle="$target_directory/bundle/wind.app"
 inputs_file="$bundle/Contents/Resources/.wind-cef-inputs"
+codesign_identity="${WIND_CODESIGN_IDENTITY:--}"
 
 build_binary() {
   if [[ "$(basename "$target_directory")" == "release" ]]; then
@@ -55,7 +56,7 @@ if "$needs_bundle"; then
   )
 
   printf '%s\n' "$inputs_hash" > "$inputs_file"
-  codesign --force --deep --sign - "$bundle"
+  codesign --force --deep --sign "$codesign_identity" "$bundle"
 else
   (
     cd "$repository_root"
@@ -73,7 +74,7 @@ else
       "$bundle/Contents/Frameworks/$helper.app/Contents/MacOS/$helper"
   done
 
-  codesign --force --deep --sign - "$bundle"
+  codesign --force --deep --sign "$codesign_identity" "$bundle"
 fi
 
 exec "$bundle/Contents/MacOS/wind" "$@"
