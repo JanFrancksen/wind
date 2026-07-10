@@ -1,8 +1,8 @@
 name: Release macOS app
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
 
 permissions:
   contents: write
@@ -19,6 +19,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set release tag
+        id: release
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+          echo "tag=v${version}-build.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
       - name: Build production bundle
         run: |
           cargo build --release --bins --locked
@@ -28,12 +34,20 @@ jobs:
         run: |
           ditto -c -k --sequesterRsrc --keepParent \
             target/release/bundle/wind.app \
-            wind-macos-${{ github.event.release.tag_name }}.zip
+            wind-macos-${{ steps.release.outputs.tag }}.zip
 
-      - name: Upload release asset
+      - name: Create release and upload asset
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
-            "wind-macos-${{ github.event.release.tag_name }}.zip" \
-            --clobber
+          tag="${{ steps.release.outputs.tag }}"
+          asset="wind-macos-${tag}.zip"
+
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+          else
+            gh release create "$tag" "$asset" \
+              --target "${{ github.sha }}" \
+              --title "Wind $tag" \
+              --generate-notes
+          fi
