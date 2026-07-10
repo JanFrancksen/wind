@@ -1,6 +1,6 @@
 #[cfg(all(feature = "cef-renderer", target_os = "macos"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use cef::build_util::mac::{bundle, BundleInfo};
+    use cef::build_util::mac::{BundleInfo, bundle};
     use semver::Version;
     use std::path::{Path, PathBuf};
 

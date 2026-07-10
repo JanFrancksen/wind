@@ -88,8 +88,9 @@ fn main() -> eframe::Result<()> {
     #[cfg(not(feature = "cef-renderer"))]
     let cef_available = false;
 
-    let app_icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/app/wind-macos.png"))
-        .expect("the bundled Wind app icon must be a valid PNG");
+    let app_icon =
+        eframe::icon_data::from_png_bytes(include_bytes!("../assets/app/wind-macos.png"))
+            .expect("the bundled Wind app icon must be a valid PNG");
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
