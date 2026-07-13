@@ -37,6 +37,9 @@ pub enum CefRuntimeError {
 
 impl CefRuntime {
     pub fn initialize() -> Result<Self, CefRuntimeError> {
+        #[cfg(target_os = "macos")]
+        platform::initialize_application()?;
+
         let library = load_cef_library()?;
         let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 
@@ -1173,12 +1176,58 @@ fn set_child_window_visible(_browser: &Browser, _visible: bool) {}
 #[cfg(target_os = "macos")]
 mod platform {
     use std::ptr::NonNull;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    use cef::sys::cef_window_handle_t;
-    use objc2_app_kit::NSView;
+    use cef::{
+        application_mac::{CefAppProtocol, CrAppControlProtocol, CrAppProtocol},
+        sys::cef_window_handle_t,
+    };
+    use objc2::{
+        ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained,
+        runtime::Bool,
+    };
+    use objc2_app_kit::{NSApplication, NSView};
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
-    use crate::renderer::PhysicalRect;
+    use crate::renderer::{CefRuntimeError, PhysicalRect};
+
+    static HANDLING_SEND_EVENT: AtomicBool = AtomicBool::new(false);
+
+    define_class!(
+        // SAFETY: NSApplication permits subclassing. CEF requires the shared
+        // application to implement CefAppProtocol before CEF is initialized.
+        #[unsafe(super(NSApplication))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WindApplication"]
+        struct WindApplication;
+
+        unsafe impl CrAppProtocol for WindApplication {
+            #[unsafe(method(isHandlingSendEvent))]
+            unsafe fn is_handling_send_event(&self) -> Bool {
+                Bool::new(HANDLING_SEND_EVENT.load(Ordering::Relaxed))
+            }
+        }
+
+        unsafe impl CrAppControlProtocol for WindApplication {
+            #[unsafe(method(setHandlingSendEvent:))]
+            unsafe fn set_handling_send_event(&self, handling_send_event: Bool) {
+                HANDLING_SEND_EVENT.store(handling_send_event.as_bool(), Ordering::Relaxed);
+            }
+        }
+
+        unsafe impl CefAppProtocol for WindApplication {}
+    );
+
+    pub fn initialize_application() -> Result<(), CefRuntimeError> {
+        let Some(_main_thread) = MainThreadMarker::new() else {
+            return Err(CefRuntimeError::InitializeFailed);
+        };
+        // SAFETY: This runs on the main thread before CEF or eframe requests
+        // the shared application. NSApplication owns the returned singleton.
+        let _: Retained<WindApplication> =
+            unsafe { msg_send![WindApplication::class(), sharedApplication] };
+        Ok(())
+    }
 
     pub fn resize_window(window: cef_window_handle_t, bounds: PhysicalRect) {
         let Some(view) = ns_view(window) else {
