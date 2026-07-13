@@ -608,9 +608,10 @@ fn paint_tab_row_at(
             .max(theme.tokens.component.button.height_sm);
         let spacing = theme.tokens.primitive.space.xs;
         let is_away_from_pin = tab_is_away_from_pin(tab);
-        let action_count = if is_away_from_pin { 5.0 } else { 4.0 };
+        let action_count = if is_away_from_pin { 2.0 } else { 1.0 };
         let actions_width = (action_size * action_count) + (spacing * action_count);
         let tab_width = (row_rect.width() - actions_width).max(0.0);
+        let row_hovered = ui.rect_contains_pointer(row_rect);
         let mut row_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(row_rect)
@@ -642,46 +643,19 @@ fn paint_tab_row_at(
         {
             actions.returned = Some(tab.id);
         }
-        if DsButton::icon(Icon::Pin)
-            .ghost()
-            .small()
-            .selected(tab.pinned)
-            .width(action_size)
-            .show(&mut row_ui, theme)
-            .on_hover_text(if tab.pinned { "Unpin tab" } else { "Pin tab" })
-            .clicked()
-        {
-            actions.toggled_pin = Some(tab.id);
-        }
-        if DsButton::icon(Icon::ChevronUp)
-            .ghost()
-            .small()
-            .width(action_size)
-            .show(&mut row_ui, theme)
-            .on_hover_text("Move tab up")
-            .clicked()
-        {
-            actions.moved_up = Some(tab.id);
-        }
-        if DsButton::icon(Icon::ChevronDown)
-            .ghost()
-            .small()
-            .width(action_size)
-            .show(&mut row_ui, theme)
-            .on_hover_text("Move tab down")
-            .clicked()
-        {
-            actions.moved_down = Some(tab.id);
-        }
-        if DsButton::icon(Icon::X)
-            .danger()
-            .small()
-            .width(action_size)
-            .show(&mut row_ui, theme)
-            .on_hover_text("Close tab")
-            .clicked()
-        {
-            actions.closed = Some(tab.id);
+        if row_hovered {
+            if DsButton::icon(Icon::X)
+                .ghost()
+                .small()
+                .width(action_size)
+                .show(&mut row_ui, theme)
+                .on_hover_text("Close tab")
+                .clicked()
+            {
+                actions.closed = Some(tab.id);
+            }
+        } else {
+            row_ui.add_space(action_size);
         }
     });
 }
