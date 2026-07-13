@@ -14,7 +14,7 @@ use cef::*;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{
-    browser::TabId,
+    browser::{Favicon, TabId},
     renderer::{FaviconUpdate, PageTarget, PhysicalRect, RendererStatus, favicon},
 };
 
@@ -367,7 +367,7 @@ impl CefEventBridge {
         })
     }
 
-    fn submit_favicon(&self, request: FaviconRequest, png_bytes: Option<Vec<u8>>) {
+    fn submit_favicon(&self, request: FaviconRequest, favicon: Option<Favicon>) {
         let is_current = self
             .favicon_requests
             .borrow()
@@ -383,7 +383,7 @@ impl CefEventBridge {
         self.favicon_updates.borrow_mut().push(FaviconUpdate {
             tab_id: request.tab_id,
             page_revision: request.page_revision,
-            png_bytes,
+            favicon,
         });
         if let Some(context) = self.repaint_context.borrow().as_ref() {
             context.request_repaint();
@@ -836,18 +836,26 @@ wrap_download_image_callback! {
             _http_status_code: std::os::raw::c_int,
             image: Option<&mut Image>,
         ) {
-            let png_bytes = image.and_then(favicon_png_bytes);
-            self.events.submit_favicon(self.request, png_bytes);
+            self.events
+                .submit_favicon(self.request, image.and_then(favicon_bitmap));
         }
     }
 }
 
-fn favicon_png_bytes(image: &mut Image) -> Option<Vec<u8>> {
-    let png = image.as_png(1.0, 1, None, None)?;
-    let mut bytes = vec![0; png.size()];
-    let written = png.data(Some(&mut bytes), 0);
-    bytes.truncate(written);
-    (!bytes.is_empty()).then_some(bytes)
+fn favicon_bitmap(image: &mut Image) -> Option<Favicon> {
+    let mut width = 0;
+    let mut height = 0;
+    let bitmap = image.as_bitmap(
+        1.0,
+        ColorType::RGBA_8888,
+        AlphaType::POSTMULTIPLIED,
+        Some(&mut width),
+        Some(&mut height),
+    )?;
+    let mut rgba = vec![0; bitmap.size()];
+    let written = bitmap.data(Some(&mut rgba), 0);
+    rgba.truncate(written);
+    Favicon::from_rgba(width as usize, height as usize, rgba)
 }
 
 wrap_keyboard_handler! {
@@ -955,6 +963,10 @@ mod tests {
     use super::*;
     use crate::browser::BrowserState;
 
+    fn test_favicon(value: u8) -> Favicon {
+        Favicon::from_rgba(1, 1, vec![value, value, value, 255]).unwrap()
+    }
+
     #[test]
     fn command_s_from_the_focused_browser_is_an_app_shortcut() {
         let event = KeyEvent {
@@ -994,12 +1006,12 @@ mod tests {
         let stale_request = events.begin_preferred_favicon_request(tab_id).unwrap();
         let current_request = events.begin_preferred_favicon_request(tab_id).unwrap();
 
-        events.submit_favicon(stale_request, Some(vec![1]));
-        events.submit_favicon(current_request, Some(vec![2]));
+        events.submit_favicon(stale_request, Some(test_favicon(1)));
+        events.submit_favicon(current_request, Some(test_favicon(2)));
 
         let updates = events.take_favicon_updates();
         assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].png_bytes, Some(vec![2]));
+        assert_eq!(updates[0].favicon, Some(test_favicon(2)));
     }
 
     #[test]
@@ -1011,7 +1023,7 @@ mod tests {
         let stale_request = events.begin_preferred_favicon_request(tab_id).unwrap();
 
         events.track_page(tab_id, 1);
-        events.submit_favicon(stale_request, Some(vec![1]));
+        events.submit_favicon(stale_request, Some(test_favicon(1)));
 
         assert!(events.take_favicon_updates().is_empty());
     }
@@ -1067,7 +1079,7 @@ mod tests {
 
         let updates = events.take_favicon_updates();
         assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].png_bytes, None);
+        assert_eq!(updates[0].favicon, None);
     }
 
     #[test]
