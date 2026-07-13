@@ -90,6 +90,7 @@ pub struct SizeTokens {
 #[derive(Clone)]
 pub struct MotionTokens {
     pub sidebar_collapse_seconds: f32,
+    pub tab_reorder_seconds: f32,
 }
 
 #[derive(Clone)]

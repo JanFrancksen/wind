@@ -104,6 +104,7 @@ impl Theme {
 
         let motion = MotionTokens {
             sidebar_collapse_seconds: 0.26,
+            tab_reorder_seconds: 0.16,
         };
 
         let semantic = SemanticTokens {

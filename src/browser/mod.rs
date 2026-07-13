@@ -1,6 +1,23 @@
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct TabId(u64);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabGroup {
+    Highlight,
+    Pinned,
+    Today,
+}
+
+impl TabGroup {
+    fn rank(self) -> usize {
+        match self {
+            Self::Highlight => 0,
+            Self::Pinned => 1,
+            Self::Today => 2,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AddressAction {
     Navigate(String),
@@ -29,6 +46,18 @@ pub struct Tab {
     pub favicon: Option<Favicon>,
     pub favicon_revision: u64,
     pub render_revision: u64,
+}
+
+impl Tab {
+    pub fn group(&self) -> TabGroup {
+        if self.highlighted {
+            TabGroup::Highlight
+        } else if self.pinned {
+            TabGroup::Pinned
+        } else {
+            TabGroup::Today
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -272,6 +301,54 @@ impl BrowserState {
         self.move_active_tab_by(1);
     }
 
+    pub fn place_tab(&mut self, tab_id: TabId, group: TabGroup, destination_index: usize) {
+        let Some(source_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let active_id = self.active_tab().id;
+        let mut tab = self.tabs.remove(source_index);
+
+        match group {
+            TabGroup::Highlight => {
+                if !tab.pinned {
+                    tab.pinned_url = Some(tab.url.clone());
+                }
+                tab.pinned = true;
+                tab.highlighted = true;
+            }
+            TabGroup::Pinned => {
+                if !tab.pinned {
+                    tab.pinned_url = Some(tab.url.clone());
+                }
+                tab.pinned = true;
+                tab.highlighted = false;
+            }
+            TabGroup::Today => {
+                tab.pinned = false;
+                tab.pinned_url = None;
+                tab.highlighted = false;
+            }
+        }
+
+        let group_start = self
+            .tabs
+            .iter()
+            .position(|candidate| candidate.group().rank() >= group.rank())
+            .unwrap_or(self.tabs.len());
+        let group_len = self
+            .tabs
+            .iter()
+            .filter(|candidate| candidate.group() == group)
+            .count();
+        let insertion_index = group_start + destination_index.min(group_len);
+        self.tabs.insert(insertion_index, tab);
+        self.active_tab = self
+            .tabs
+            .iter()
+            .position(|candidate| candidate.id == active_id)
+            .unwrap_or(0);
+    }
+
     pub fn navigate_active(&mut self, input: &str) {
         let url = normalize_url(input);
         let tab = &mut self.tabs[self.active_tab];
@@ -399,19 +476,20 @@ impl BrowserState {
     }
 
     fn move_active_tab_by(&mut self, offset: isize) {
-        let current = self.active_tab;
-        let target = current.saturating_add_signed(offset);
-
-        if target >= self.tabs.len() {
+        let active_id = self.active_tab().id;
+        let group = self.active_tab().group();
+        let group_index = self.tabs[..self.active_tab]
+            .iter()
+            .filter(|tab| tab.group() == group)
+            .count();
+        let Some(target) = group_index.checked_add_signed(offset) else {
+            return;
+        };
+        let group_len = self.tabs.iter().filter(|tab| tab.group() == group).count();
+        if target >= group_len {
             return;
         }
-
-        if self.tabs[current].pinned != self.tabs[target].pinned {
-            return;
-        }
-
-        self.tabs.swap(current, target);
-        self.active_tab = target;
+        self.place_tab(active_id, group, target);
     }
 }
 
@@ -512,7 +590,9 @@ fn title_for_url(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddressAction, BrowserState, Favicon, normalize_url, parse_address_action};
+    use super::{
+        AddressAction, BrowserState, Favicon, TabGroup, normalize_url, parse_address_action,
+    };
 
     #[test]
     fn normalizes_searches_and_domains() {
@@ -633,6 +713,74 @@ mod tests {
         browser.move_active_tab_down();
         assert_eq!(browser.active_page().tab_id, first);
         assert_eq!(browser.tab_ids().collect::<Vec<_>>(), vec![second, first]);
+    }
+
+    #[test]
+    fn places_tabs_by_stable_id_within_a_group() {
+        let mut browser = BrowserState::with_initial_url("one.example");
+        let one = browser.active_page().tab_id;
+        let two = browser.add_tab("two.example");
+        let three = browser.add_tab("three.example");
+
+        browser.place_tab(one, TabGroup::Today, 2);
+        assert_eq!(browser.tab_ids().collect::<Vec<_>>(), vec![two, three, one]);
+
+        browser.place_tab(one, TabGroup::Today, 0);
+        assert_eq!(browser.tab_ids().collect::<Vec<_>>(), vec![one, two, three]);
+    }
+
+    #[test]
+    fn placing_a_tab_across_groups_updates_its_pinning_state() {
+        let mut browser = BrowserState::with_initial_url("one.example");
+        let one = browser.active_page().tab_id;
+
+        browser.place_tab(one, TabGroup::Highlight, 0);
+        assert!(browser.active_tab().pinned);
+        assert!(browser.active_tab().highlighted);
+        assert_eq!(
+            browser.active_tab().pinned_url.as_deref(),
+            Some("https://one.example")
+        );
+
+        browser.place_tab(one, TabGroup::Pinned, 0);
+        assert!(browser.active_tab().pinned);
+        assert!(!browser.active_tab().highlighted);
+        assert_eq!(
+            browser.active_tab().pinned_url.as_deref(),
+            Some("https://one.example")
+        );
+
+        browser.place_tab(one, TabGroup::Today, 0);
+        assert!(!browser.active_tab().pinned);
+        assert!(!browser.active_tab().highlighted);
+        assert_eq!(browser.active_tab().pinned_url, None);
+    }
+
+    #[test]
+    fn placing_a_background_tab_preserves_the_active_tab_and_renderer_ids() {
+        let mut browser = BrowserState::with_initial_url("one.example");
+        let one = browser.active_page().tab_id;
+        let two = browser.add_tab("two.example");
+        let active = browser.active_page();
+
+        browser.place_tab(one, TabGroup::Pinned, usize::MAX);
+
+        assert_eq!(browser.active_page(), active);
+        assert_eq!(browser.tab_ids().collect::<Vec<_>>(), vec![one, two]);
+    }
+
+    #[test]
+    fn arrow_reordering_does_not_cross_exact_tab_groups() {
+        let mut browser = BrowserState::with_initial_url("highlight.example");
+        browser.toggle_pin_active_tab();
+        browser.promote_active_pinned_tab();
+        browser.add_tab("pinned.example");
+        browser.toggle_pin_active_tab();
+
+        browser.move_active_tab_up();
+
+        assert_eq!(browser.active_tab().url, "https://pinned.example");
+        assert_eq!(browser.active_index(), 1);
     }
 
     #[test]

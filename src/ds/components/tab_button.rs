@@ -64,6 +64,7 @@ impl<'a> TabButton<'a> {
                     .fill(fill)
                     .stroke(egui::Stroke::NONE)
                     .corner_radius(tab.radius)
+                    .sense(egui::Sense::click_and_drag())
                     .min_size(egui::vec2(width.max(tab.height), tab.height)),
             )
         })
