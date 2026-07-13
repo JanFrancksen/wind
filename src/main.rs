@@ -88,9 +88,7 @@ fn main() -> eframe::Result<()> {
     #[cfg(not(feature = "cef-renderer"))]
     let cef_available = false;
 
-    let app_icon =
-        eframe::icon_data::from_png_bytes(include_bytes!("../assets/app/wind-macos.png"))
-            .expect("the bundled Wind app icon must be a valid PNG");
+    let app_icon = runtime_app_icon();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -118,4 +116,24 @@ fn main() -> eframe::Result<()> {
     }
 
     result
+}
+
+#[cfg(target_os = "macos")]
+fn runtime_app_icon() -> egui::IconData {
+    egui::IconData::default()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn runtime_app_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/app/wind-macos.png"))
+        .expect("the bundled Wind app icon must be a valid PNG")
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_does_not_override_the_bundled_application_icon() {
+        assert_eq!(super::runtime_app_icon(), eframe::egui::IconData::default());
+    }
 }
