@@ -172,7 +172,7 @@ fn highlighted_pin_tile(
         egui::Stroke::new(theme.tokens.primitive.stroke.hairline, stroke_color),
         egui::StrokeKind::Inside,
     );
-    if let Some(texture) = highlighted_favicon_texture(ui, tab) {
+    if let Some(texture) = favicon_texture(ui, tab) {
         let image_size = (size * 0.5).clamp(20.0, 36.0);
         let image_rect = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(image_size));
         egui::Image::new(&texture)
@@ -196,9 +196,9 @@ struct CachedFavicon {
     texture: egui::TextureHandle,
 }
 
-fn highlighted_favicon_texture(ui: &egui::Ui, tab: &Tab) -> Option<egui::TextureHandle> {
+fn favicon_texture(ui: &egui::Ui, tab: &Tab) -> Option<egui::TextureHandle> {
     let favicon = tab.favicon.as_ref()?;
-    let cache_id = egui::Id::new(("highlighted_favicon", tab.id));
+    let cache_id = egui::Id::new(("favicon", tab.id));
 
     if let Some(cached) = ui
         .ctx()
@@ -210,7 +210,7 @@ fn highlighted_favicon_texture(ui: &egui::Ui, tab: &Tab) -> Option<egui::Texture
 
     let image = egui::ColorImage::from_rgba_unmultiplied(favicon.size(), favicon.rgba());
     let texture = ui.ctx().load_texture(
-        format!("highlighted-favicon-{:?}", tab.id),
+        format!("favicon-{:?}", tab.id),
         image,
         egui::TextureOptions::LINEAR,
     );
@@ -293,6 +293,7 @@ fn tab_sections(
         let row_height = theme.tokens.component.tab.height;
 
         ui.push_id(format!("{:?}", tab.id), |ui| {
+            let favicon = favicon_texture(ui, tab);
             let (row_rect, _) =
                 ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::hover());
             let mut row_ui = ui.new_child(
@@ -304,6 +305,7 @@ fn tab_sections(
             row_ui.spacing_mut().item_spacing.x = spacing;
 
             let tab_response = TabButton::new(&tab.title)
+                .favicon(favicon.as_ref())
                 .selected(is_active)
                 .width(tab_width)
                 .show(&mut row_ui, theme);
