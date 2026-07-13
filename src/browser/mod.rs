@@ -24,6 +24,7 @@ pub struct Tab {
     pub history: Vec<String>,
     pub history_index: usize,
     pub pinned: bool,
+    pub pinned_url: Option<String>,
     pub highlighted: bool,
     pub favicon: Option<Favicon>,
     pub favicon_revision: u64,
@@ -137,6 +138,7 @@ impl BrowserState {
             history: vec![url],
             history_index: 0,
             pinned: false,
+            pinned_url: None,
             highlighted: false,
             favicon: None,
             favicon_revision: 0,
@@ -182,8 +184,10 @@ impl BrowserState {
     pub fn duplicate_active_tab(&mut self) -> TabId {
         let url = self.active_tab().url.clone();
         let pinned = self.active_tab().pinned;
+        let pinned_url = self.active_tab().pinned_url.clone();
         let id = self.add_tab(&url);
         self.tabs[self.active_tab].pinned = pinned;
+        self.tabs[self.active_tab].pinned_url = pinned_url;
         self.sort_pinned_tabs();
         id
     }
@@ -204,10 +208,46 @@ impl BrowserState {
     pub fn toggle_pin_active_tab(&mut self) {
         let tab = &mut self.tabs[self.active_tab];
         tab.pinned = !tab.pinned;
-        if !tab.pinned {
+        if tab.pinned {
+            tab.pinned_url = Some(tab.url.clone());
+        } else {
+            tab.pinned_url = None;
             tab.highlighted = false;
         }
         self.sort_pinned_tabs();
+    }
+
+    pub fn return_active_to_pinned_url(&mut self) {
+        let Some(url) = self.active_tab().pinned_url.clone() else {
+            return;
+        };
+        if self.active_tab().url != url {
+            self.navigate_active(&url);
+        }
+    }
+
+    pub fn set_page_url(&mut self, tab_id: TabId, page_revision: u64, url: String) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if tab.render_revision != page_revision || tab.url == url {
+            return;
+        }
+
+        tab.url = url.clone();
+        tab.title = title_for_url(&url);
+        tab.history.truncate(tab.history_index + 1);
+        tab.history.push(url);
+        tab.history_index = tab.history.len() - 1;
+    }
+
+    pub fn set_page_title(&mut self, tab_id: TabId, page_revision: u64, title: String) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if tab.render_revision == page_revision && !title.trim().is_empty() {
+            tab.title = title;
+        }
     }
 
     pub fn promote_active_pinned_tab(&mut self) {
@@ -332,6 +372,7 @@ impl BrowserState {
             history: vec![url],
             history_index: 0,
             pinned: false,
+            pinned_url: None,
             highlighted: false,
             favicon: None,
             favicon_revision: 0,
@@ -620,5 +661,80 @@ mod tests {
 
         assert_eq!(browser.active_tab().favicon, None);
         assert_eq!(browser.active_tab().favicon_revision, 0);
+    }
+
+    #[test]
+    fn pinned_tabs_can_return_to_the_location_that_was_pinned() {
+        let mut browser = BrowserState::with_initial_url("example.com");
+        browser.toggle_pin_active_tab();
+
+        browser.navigate_active("rust-lang.org");
+        assert_eq!(
+            browser.active_tab().pinned_url.as_deref(),
+            Some("https://example.com")
+        );
+
+        browser.return_active_to_pinned_url();
+        assert_eq!(browser.active_tab().url, "https://example.com");
+    }
+
+    #[test]
+    fn renderer_metadata_updates_the_url_and_title_without_reloading_the_page() {
+        let mut browser = BrowserState::with_initial_url("example.com");
+        let page = browser.active_page();
+
+        browser.set_page_url(
+            page.tab_id,
+            page.render_revision,
+            "https://example.com/routed".to_string(),
+        );
+        browser.set_page_title(page.tab_id, page.render_revision, "Routed page".to_string());
+
+        assert_eq!(browser.active_tab().url, "https://example.com/routed");
+        assert_eq!(browser.active_tab().title, "Routed page");
+        assert_eq!(browser.active_tab().render_revision, page.render_revision);
+    }
+
+    #[test]
+    fn ignores_renderer_metadata_from_an_old_page_revision() {
+        let mut browser = BrowserState::with_initial_url("example.com");
+        let tab_id = browser.active_page().tab_id;
+        browser.navigate_active("rust-lang.org");
+
+        browser.set_page_url(tab_id, 0, "https://stale.example".to_string());
+        browser.set_page_title(tab_id, 0, "Stale title".to_string());
+
+        assert_eq!(browser.active_tab().url, "https://rust-lang.org");
+        assert_eq!(browser.active_tab().title, "rust-lang.org");
+    }
+
+    #[test]
+    fn routed_navigation_preserves_the_previous_page_in_history() {
+        let mut browser = BrowserState::with_initial_url("example.com");
+        let page = browser.active_page();
+
+        browser.set_page_url(
+            page.tab_id,
+            page.render_revision,
+            "https://rust-lang.org".to_string(),
+        );
+        assert!(browser.can_go_back());
+
+        browser.go_back();
+        assert_eq!(browser.active_tab().url, "https://example.com");
+    }
+
+    #[test]
+    fn duplicating_an_away_pinned_tab_preserves_its_pinned_destination() {
+        let mut browser = BrowserState::with_initial_url("example.com");
+        browser.toggle_pin_active_tab();
+        browser.navigate_active("rust-lang.org");
+
+        browser.duplicate_active_tab();
+
+        assert_eq!(
+            browser.active_tab().pinned_url.as_deref(),
+            Some("https://example.com")
+        );
     }
 }

@@ -15,7 +15,10 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{
     browser::{Favicon, TabId},
-    renderer::{FaviconUpdate, PageTarget, PhysicalRect, RendererStatus, favicon},
+    renderer::{
+        FaviconUpdate, PageTarget, PageTitleUpdate, PageUrlUpdate, PhysicalRect, RendererStatus,
+        favicon,
+    },
 };
 
 pub struct CefRuntime {
@@ -274,6 +277,8 @@ struct CefEventBridge {
     toggle_sidebar_requested: Cell<bool>,
     favicon_requests: RefCell<HashMap<TabId, FaviconRequestState>>,
     favicon_updates: RefCell<Vec<FaviconUpdate>>,
+    page_url_updates: RefCell<Vec<PageUrlUpdate>>,
+    page_title_updates: RefCell<Vec<PageTitleUpdate>>,
     repaint_context: RefCell<Option<eframe::egui::Context>>,
 }
 
@@ -397,10 +402,54 @@ impl CefEventBridge {
         self.favicon_updates
             .borrow_mut()
             .retain(|update| live_tabs.contains(&update.tab_id));
+        self.page_url_updates
+            .borrow_mut()
+            .retain(|update| live_tabs.contains(&update.tab_id));
+        self.page_title_updates
+            .borrow_mut()
+            .retain(|update| live_tabs.contains(&update.tab_id));
     }
 
     fn take_favicon_updates(&self) -> Vec<FaviconUpdate> {
         std::mem::take(&mut *self.favicon_updates.borrow_mut())
+    }
+
+    fn submit_page_url(&self, tab_id: TabId, url: String) {
+        let Some(page_revision) = self.page_revision(tab_id) else {
+            return;
+        };
+        self.page_url_updates.borrow_mut().push(PageUrlUpdate {
+            tab_id,
+            page_revision,
+            url,
+        });
+        self.request_repaint();
+    }
+
+    fn submit_page_title(&self, tab_id: TabId, title: String) {
+        let Some(page_revision) = self.page_revision(tab_id) else {
+            return;
+        };
+        self.page_title_updates.borrow_mut().push(PageTitleUpdate {
+            tab_id,
+            page_revision,
+            title,
+        });
+        self.request_repaint();
+    }
+
+    fn request_repaint(&self) {
+        if let Some(context) = self.repaint_context.borrow().as_ref() {
+            context.request_repaint();
+        }
+    }
+
+    fn take_page_url_updates(&self) -> Vec<PageUrlUpdate> {
+        std::mem::take(&mut *self.page_url_updates.borrow_mut())
+    }
+
+    fn take_page_title_updates(&self) -> Vec<PageTitleUpdate> {
+        std::mem::take(&mut *self.page_title_updates.borrow_mut())
     }
 }
 
@@ -510,6 +559,14 @@ impl CefRenderer {
         self.events.take_favicon_updates()
     }
 
+    pub fn take_page_url_updates(&self) -> Vec<PageUrlUpdate> {
+        self.events.take_page_url_updates()
+    }
+
+    pub fn take_page_title_updates(&self) -> Vec<PageTitleUpdate> {
+        self.events.take_page_title_updates()
+    }
+
     pub fn sync_tabs(&mut self, tab_ids: impl IntoIterator<Item = TabId>) {
         let live_tabs = tab_ids.into_iter().collect::<HashSet<_>>();
         self.events.retain_tabs(&live_tabs);
@@ -592,8 +649,9 @@ impl CefRenderer {
             return;
         };
 
-        let should_load =
-            tab.loaded.url != target.page.url || tab.loaded.revision != target.page.render_revision;
+        // Page-initiated navigation keeps the same command revision. Loading
+        // only on a new revision avoids reloading links, redirects and SPA routes.
+        let should_load = tab.loaded.revision != target.page.render_revision;
 
         if should_load {
             self.events.track_page(tab_id, target.page.render_revision);
@@ -711,6 +769,26 @@ wrap_display_handler! {
     }
 
     impl DisplayHandler {
+        fn on_address_change(
+            &self,
+            _browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            url: Option<&CefString>,
+        ) {
+            if frame.is_some_and(|frame| frame.is_main() != 1) {
+                return;
+            }
+            if let Some(url) = url.map(CefString::to_string).filter(|url| !url.is_empty()) {
+                self.events.submit_page_url(self.tab_id, url);
+            }
+        }
+
+        fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
+            if let Some(title) = title.map(CefString::to_string).filter(|title| !title.is_empty()) {
+                self.events.submit_page_title(self.tab_id, title);
+            }
+        }
+
         fn on_favicon_urlchange(
             &self,
             browser: Option<&mut Browser>,

@@ -48,18 +48,25 @@ impl<'a> TabButton<'a> {
             .color(color.text)
             .size(theme.tokens.primitive.typography.body);
         let button = if let Some(favicon) = self.favicon {
-            egui::Button::image_and_text(egui::Image::new(favicon), title)
+            egui::Button::image_and_text(
+                egui::Image::new(favicon).fit_to_exact_size(egui::Vec2::splat(18.0)),
+                title,
+            )
         } else {
             egui::Button::new(title)
         };
 
-        ui.add_sized(
-            egui::vec2(width.max(tab.height), tab.height),
-            button
-                .fill(fill)
-                .stroke(egui::Stroke::NONE)
-                .corner_radius(tab.radius)
-                .min_size(egui::vec2(width.max(tab.height), tab.height)),
-        )
+        ui.scope(|ui| {
+            ui.spacing_mut().icon_spacing = theme.tokens.primitive.space.xs;
+            ui.add_sized(
+                egui::vec2(width.max(tab.height), tab.height),
+                button
+                    .fill(fill)
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(tab.radius)
+                    .min_size(egui::vec2(width.max(tab.height), tab.height)),
+            )
+        })
+        .inner
     }
 }

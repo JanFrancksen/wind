@@ -27,6 +27,20 @@ pub struct PageTarget {
     pub bounds: PhysicalRect,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PageUrlUpdate {
+    tab_id: crate::browser::TabId,
+    page_revision: u64,
+    url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PageTitleUpdate {
+    tab_id: crate::browser::TabId,
+    page_revision: u64,
+    title: String,
+}
+
 impl PageTarget {
     fn new(page: ActivePage, rect: egui::Rect, pixels_per_point: f32) -> Self {
         #[cfg(target_os = "macos")]
@@ -136,6 +150,12 @@ impl BrowserRenderer {
     }
 
     pub fn sync_tab_metadata(&mut self, browser: &mut BrowserState) {
+        for update in self.backend.take_page_url_updates() {
+            browser.set_page_url(update.tab_id, update.page_revision, update.url);
+        }
+        for update in self.backend.take_page_title_updates() {
+            browser.set_page_title(update.tab_id, update.page_revision, update.title);
+        }
         for update in self.backend.take_favicon_updates() {
             browser.set_favicon(update.tab_id, update.page_revision, update.favicon);
         }
@@ -189,6 +209,22 @@ impl RendererBackend {
             Self::Placeholder(_) => Vec::new(),
             #[cfg(feature = "cef-renderer")]
             Self::Cef(renderer) => renderer.take_favicon_updates(),
+        }
+    }
+
+    fn take_page_url_updates(&mut self) -> Vec<PageUrlUpdate> {
+        match self {
+            Self::Placeholder(_) => Vec::new(),
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.take_page_url_updates(),
+        }
+    }
+
+    fn take_page_title_updates(&mut self) -> Vec<PageTitleUpdate> {
+        match self {
+            Self::Placeholder(_) => Vec::new(),
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.take_page_title_updates(),
         }
     }
 

@@ -97,6 +97,7 @@ fn highlighted_pinned_tabs(
     let mut selected_tab = None;
     let mut demoted_tab = None;
     let mut unpinned_tab = None;
+    let mut return_tab = None;
 
     egui::Grid::new("highlighted_pinned_tabs")
         .num_columns(columns)
@@ -104,13 +105,23 @@ fn highlighted_pinned_tabs(
         .show(ui, |ui| {
             for (tile_index, (tab_index, tab)) in highlighted_tabs.iter().enumerate() {
                 let is_active = browser.active_index() == *tab_index;
-                let response = highlighted_pin_tile(ui, tab, is_active, tile_size, theme);
+                let (response, return_clicked) =
+                    highlighted_pin_tile(ui, tab, is_active, tile_size, theme);
 
-                if response.clicked() {
+                if return_clicked {
+                    return_tab = Some(*tab_index);
+                }
+
+                if response.clicked() && !return_clicked {
                     selected_tab = Some(*tab_index);
                 }
 
                 response.context_menu(|ui| {
+                    if tab_is_away_from_pin(tab) && ui.button("Return to pinned tab").clicked() {
+                        return_tab = Some(*tab_index);
+                        ui.close();
+                    }
+
                     if ui.button("Demote from highlight").clicked() {
                         demoted_tab = Some(*tab_index);
                         ui.close();
@@ -133,6 +144,12 @@ fn highlighted_pinned_tabs(
         *address_input = browser.active_url_for_input();
     }
 
+    if let Some(index) = return_tab {
+        browser.select_tab(index);
+        browser.return_active_to_pinned_url();
+        *address_input = browser.active_url_for_input();
+    }
+
     if let Some(index) = demoted_tab {
         browser.select_tab(index);
         browser.demote_active_highlighted_tab();
@@ -152,7 +169,7 @@ fn highlighted_pin_tile(
     selected: bool,
     size: f32,
     theme: &Theme,
-) -> egui::Response {
+) -> (egui::Response, bool) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     let color = &theme.tokens.semantic.color;
     let fill = if selected {
@@ -187,7 +204,33 @@ fn highlighted_pin_tile(
             color.text_strong,
         );
     }
-    response
+    let return_clicked = if tab_is_away_from_pin(tab) {
+        let icon_size = 14.0;
+        let icon_rect = egui::Rect::from_min_size(
+            rect.right_top() + egui::vec2(-icon_size - 6.0, 6.0),
+            egui::Vec2::splat(icon_size),
+        );
+        let icon_response = ui
+            .interact(
+                icon_rect.expand(4.0),
+                egui::Id::new(("return-to-pinned", tab.id)),
+                egui::Sense::click(),
+            )
+            .on_hover_text("Return to pinned tab");
+        Icon::ArrowLeft
+            .image(icon_size, color.text_muted)
+            .paint_at(ui, icon_rect);
+        icon_response.clicked()
+    } else {
+        false
+    };
+    (response, return_clicked)
+}
+
+fn tab_is_away_from_pin(tab: &Tab) -> bool {
+    tab.pinned_url
+        .as_deref()
+        .is_some_and(|pinned_url| pinned_url != tab.url)
 }
 
 #[derive(Clone)]
@@ -208,7 +251,7 @@ fn favicon_texture(ui: &egui::Ui, tab: &Tab) -> Option<egui::TextureHandle> {
         return Some(cached.texture);
     }
 
-    let image = egui::ColorImage::from_rgba_unmultiplied(favicon.size(), favicon.rgba());
+    let image = normalized_favicon_image(favicon);
     let texture = ui.ctx().load_texture(
         format!("favicon-{:?}", tab.id),
         image,
@@ -225,6 +268,47 @@ fn favicon_texture(ui: &egui::Ui, tab: &Tab) -> Option<egui::TextureHandle> {
     });
 
     Some(texture)
+}
+
+fn normalized_favicon_image(favicon: &crate::browser::Favicon) -> egui::ColorImage {
+    let [width, height] = favicon.size();
+    let rgba = favicon.rgba();
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+
+    for y in 0..height {
+        for x in 0..width {
+            if rgba[(y * width + x) * 4 + 3] > 8 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+
+    if min_x > max_x || min_y > max_y {
+        return egui::ColorImage::from_rgba_unmultiplied(favicon.size(), favicon.rgba());
+    }
+
+    let content_width = max_x - min_x + 1;
+    let content_height = max_y - min_y + 1;
+    let side = content_width.max(content_height);
+    let offset_x = (side - content_width) / 2;
+    let offset_y = (side - content_height) / 2;
+    let mut normalized = vec![0; side * side * 4];
+
+    for y in 0..content_height {
+        for x in 0..content_width {
+            let source = ((min_y + y) * width + min_x + x) * 4;
+            let target = ((offset_y + y) * side + offset_x + x) * 4;
+            normalized[target..target + 4].copy_from_slice(&rgba[source..source + 4]);
+        }
+    }
+
+    egui::ColorImage::from_rgba_unmultiplied([side, side], &normalized)
 }
 
 fn tile_label(title: &str) -> String {
@@ -265,6 +349,7 @@ fn tab_sections(
     let mut highlighted_tab = None;
     let mut moved_up_tab = None;
     let mut moved_down_tab = None;
+    let mut return_tab = None;
 
     for (index, tab) in tabs.iter().enumerate() {
         if tab.pinned && !tab.highlighted && (index == 0 || tabs[index - 1].highlighted) {
@@ -288,7 +373,9 @@ fn tab_sections(
             .close_size
             .max(theme.tokens.component.button.height_sm);
         let spacing = theme.tokens.primitive.space.xs;
-        let actions_width = (action_size * 4.0) + (spacing * 4.0);
+        let is_away_from_pin = tab_is_away_from_pin(tab);
+        let action_count = if is_away_from_pin { 5.0 } else { 4.0 };
+        let actions_width = (action_size * action_count) + (spacing * action_count);
         let tab_width = (row_width - actions_width).max(0.0);
         let row_height = theme.tokens.component.tab.height;
 
@@ -315,6 +402,11 @@ fn tab_sections(
             }
 
             tab_response.context_menu(|ui| {
+                if is_away_from_pin && ui.button("Return to pinned tab").clicked() {
+                    return_tab = Some(index);
+                    ui.close();
+                }
+
                 if tab.pinned && !tab.highlighted {
                     if ui.button("Promote to highlight").clicked() {
                         highlighted_tab = Some(index);
@@ -325,6 +417,18 @@ fn tab_sections(
                     ui.close();
                 }
             });
+
+            if is_away_from_pin
+                && DsButton::icon(Icon::ArrowLeft)
+                    .ghost()
+                    .small()
+                    .width(action_size)
+                    .show(&mut row_ui, theme)
+                    .on_hover_text("Return to pinned tab")
+                    .clicked()
+            {
+                return_tab = Some(index);
+            }
 
             if DsButton::icon(Icon::Pin)
                 .ghost()
@@ -375,6 +479,12 @@ fn tab_sections(
         *address_input = browser.active_url_for_input();
     }
 
+    if let Some(index) = return_tab {
+        browser.select_tab(index);
+        browser.return_active_to_pinned_url();
+        *address_input = browser.active_url_for_input();
+    }
+
     if let Some(index) = highlighted_tab {
         browser.select_tab(index);
         browser.promote_active_pinned_tab();
@@ -417,4 +527,25 @@ fn section_label(ui: &mut egui::Ui, label: &str, theme: &Theme) {
             .color(theme.tokens.semantic.color.text_muted)
             .size(theme.tokens.primitive.typography.caption),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::browser::Favicon;
+
+    use super::normalized_favicon_image;
+
+    #[test]
+    fn favicon_normalization_crops_transparent_margins_to_a_square() {
+        let mut rgba = vec![0; 4 * 4 * 4];
+        for x in 1..=2 {
+            let pixel = (2 * 4 + x) * 4;
+            rgba[pixel..pixel + 4].copy_from_slice(&[255, 80, 20, 255]);
+        }
+        let favicon = Favicon::from_rgba(4, 4, rgba).unwrap();
+
+        let normalized = normalized_favicon_image(&favicon);
+
+        assert_eq!(normalized.size, [2, 2]);
+    }
 }
