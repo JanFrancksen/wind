@@ -730,6 +730,20 @@ mod tests {
     }
 
     #[test]
+    fn placing_a_tab_at_its_current_position_is_a_no_op() {
+        let mut browser = BrowserState::with_initial_url("one.example");
+        let one = browser.active_page();
+        let two = browser.add_tab("two.example");
+        let ids = browser.tab_ids().collect::<Vec<_>>();
+
+        browser.place_tab(two, TabGroup::Today, 1);
+
+        assert_eq!(browser.tab_ids().collect::<Vec<_>>(), ids);
+        browser.select_tab(0);
+        assert_eq!(browser.active_page(), one);
+    }
+
+    #[test]
     fn placing_a_tab_across_groups_updates_its_pinning_state() {
         let mut browser = BrowserState::with_initial_url("one.example");
         let one = browser.active_page().tab_id;
