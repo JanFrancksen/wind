@@ -1,3 +1,4 @@
+mod favicon;
 mod new_tab;
 mod placeholder;
 

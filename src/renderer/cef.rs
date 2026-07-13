@@ -15,7 +15,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{
     browser::TabId,
-    renderer::{FaviconUpdate, PageTarget, PhysicalRect, RendererStatus},
+    renderer::{FaviconUpdate, PageTarget, PhysicalRect, RendererStatus, favicon},
 };
 
 pub struct CefRuntime {
@@ -252,6 +252,8 @@ struct FaviconRequest {
 struct FaviconRequestState {
     page_revision: u64,
     generation: u64,
+    preferred_icon_seen: bool,
+    fallback_requested: bool,
 }
 
 #[derive(Default)]
@@ -289,24 +291,77 @@ impl CefEventBridge {
         let entry = requests.entry(tab_id).or_insert(FaviconRequestState {
             page_revision,
             generation: 0,
+            preferred_icon_seen: false,
+            fallback_requested: false,
         });
         if entry.page_revision != page_revision {
             *entry = FaviconRequestState {
                 page_revision,
                 generation: entry.generation + 1,
+                preferred_icon_seen: false,
+                fallback_requested: false,
             };
         }
     }
 
-    fn begin_favicon_request(&self, tab_id: TabId) -> FaviconRequest {
+    fn begin_preferred_favicon_request(&self, tab_id: TabId) -> Option<FaviconRequest> {
+        let page_revision = self.favicon_requests.borrow().get(&tab_id)?.page_revision;
+        self.begin_preferred_favicon_request_for_page(tab_id, page_revision)
+    }
+
+    fn begin_preferred_favicon_request_for_page(
+        &self,
+        tab_id: TabId,
+        page_revision: u64,
+    ) -> Option<FaviconRequest> {
         let mut requests = self.favicon_requests.borrow_mut();
-        let entry = requests.entry(tab_id).or_default();
+        let entry = requests.get_mut(&tab_id)?;
+        if entry.page_revision != page_revision {
+            return None;
+        }
+        entry.preferred_icon_seen = true;
         entry.generation += 1;
-        FaviconRequest {
+        Some(FaviconRequest {
             tab_id,
             page_revision: entry.page_revision,
             generation: entry.generation,
+        })
+    }
+
+    fn page_revision(&self, tab_id: TabId) -> Option<u64> {
+        self.favicon_requests
+            .borrow()
+            .get(&tab_id)
+            .map(|state| state.page_revision)
+    }
+
+    fn begin_fallback_favicon_request(&self, tab_id: TabId) -> Option<FaviconRequest> {
+        let mut requests = self.favicon_requests.borrow_mut();
+        let entry = requests.get_mut(&tab_id)?;
+        if entry.preferred_icon_seen || entry.fallback_requested {
+            return None;
         }
+
+        entry.fallback_requested = true;
+        entry.generation += 1;
+        Some(FaviconRequest {
+            tab_id,
+            page_revision: entry.page_revision,
+            generation: entry.generation,
+        })
+    }
+
+    fn begin_favicon_clear_request(&self, tab_id: TabId) -> Option<FaviconRequest> {
+        let mut requests = self.favicon_requests.borrow_mut();
+        let entry = requests.get_mut(&tab_id)?;
+        entry.preferred_icon_seen = false;
+        entry.fallback_requested = true;
+        entry.generation += 1;
+        Some(FaviconRequest {
+            tab_id,
+            page_revision: entry.page_revision,
+            generation: entry.generation,
+        })
     }
 
     fn submit_favicon(&self, request: FaviconRequest, png_bytes: Option<Vec<u8>>) {
@@ -315,11 +370,8 @@ impl CefEventBridge {
             .borrow()
             .get(&request.tab_id)
             .is_some_and(|current| {
-                *current
-                    == FaviconRequestState {
-                        page_revision: request.page_revision,
-                        generation: request.generation,
-                    }
+                current.page_revision == request.page_revision
+                    && current.generation == request.generation
             });
         if !is_current {
             return;
@@ -401,6 +453,7 @@ impl CefRenderer {
             return RendererStatus::WaitingForNativeBrowser;
         }
 
+        self.ensure_fallback_favicon(target.page.tab_id, &target.page.url);
         self.sync_browser(target.page.tab_id, target);
         RendererStatus::Ready
     }
@@ -581,6 +634,20 @@ impl CefRenderer {
     fn current_browser(&self, tab_id: TabId) -> Option<Browser> {
         self.tabs.get(&tab_id)?.browser.borrow().browser.clone()
     }
+
+    fn ensure_fallback_favicon(&self, tab_id: TabId, page_url: &str) {
+        let Some(icon_url) = favicon::fallback_url(page_url) else {
+            return;
+        };
+        let Some(request) = self.events.begin_fallback_favicon_request(tab_id) else {
+            return;
+        };
+        let Some(mut browser) = self.current_browser(tab_id) else {
+            return;
+        };
+
+        download_favicon(Some(&mut browser), &icon_url, request, &self.events);
+    }
 }
 
 fn request_browser_close(slot: &SharedBrowser) -> Option<Browser> {
@@ -627,6 +694,10 @@ wrap_client! {
                 self.events.clone(),
             ))
         }
+
+        fn load_handler(&self) -> Option<LoadHandler> {
+            Some(WindLoadHandler::new(self.tab_id, self.events.clone()))
+        }
     }
 }
 
@@ -642,29 +713,111 @@ wrap_display_handler! {
             browser: Option<&mut Browser>,
             icon_urls: Option<&mut CefStringList>,
         ) {
-            let request = self.events.begin_favicon_request(self.tab_id);
             let icon_url = icon_urls
                 .and_then(|urls| urls.clone().into_iter().next())
                 .filter(|url| !url.is_empty());
             let Some(icon_url) = icon_url else {
-                self.events.submit_favicon(request, None);
+                if let Some(request) = self.events.begin_favicon_clear_request(self.tab_id) {
+                    self.events.submit_favicon(request, None);
+                }
                 return;
             };
-            let Some(host) = browser.and_then(|browser| browser.host()) else {
+            let Some(request) = self.events.begin_preferred_favicon_request(self.tab_id) else {
                 return;
             };
+            download_favicon(browser, &icon_url, request, &self.events);
+        }
+    }
+}
 
-            let mut callback =
-                WindFaviconDownloadCallback::new(request, self.events.clone());
-            host.download_image(
-                Some(&CefString::from(icon_url.as_str())),
-                1,
-                64,
-                0,
-                Some(&mut callback),
+wrap_load_handler! {
+    struct WindLoadHandler {
+        tab_id: TabId,
+        events: SharedEventBridge,
+    }
+
+    impl LoadHandler {
+        fn on_load_end(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            _http_status_code: std::os::raw::c_int,
+        ) {
+            let Some(frame) = frame.filter(|frame| frame.is_main() == 1) else {
+                return;
+            };
+            let Some(browser) = browser.cloned() else {
+                return;
+            };
+            let Some(page_revision) = self.events.page_revision(self.tab_id) else {
+                return;
+            };
+            let page_url = CefString::from(&frame.url()).to_string();
+            let mut visitor = WindFaviconSourceVisitor::new(
+                self.tab_id,
+                self.events.clone(),
+                browser,
+                page_url,
+                page_revision,
+            );
+            frame.source(Some(&mut visitor));
+        }
+    }
+}
+
+wrap_string_visitor! {
+    struct WindFaviconSourceVisitor {
+        tab_id: TabId,
+        events: SharedEventBridge,
+        browser: Browser,
+        page_url: String,
+        page_revision: u64,
+    }
+
+    impl CefStringVisitor {
+        fn visit(&self, source: Option<&CefString>) {
+            let Some(source) = source else {
+                return;
+            };
+            let source = source.to_string();
+            let Some(icon_url) = favicon::declared_url(&self.page_url, &source) else {
+                return;
+            };
+            let Some(request) = self.events.begin_preferred_favicon_request_for_page(
+                self.tab_id,
+                self.page_revision,
+            ) else {
+                return;
+            };
+            let mut browser = self.browser.clone();
+            download_favicon(
+                Some(&mut browser),
+                &icon_url,
+                request,
+                &self.events,
             );
         }
     }
+}
+
+fn download_favicon(
+    browser: Option<&mut Browser>,
+    icon_url: &str,
+    request: FaviconRequest,
+    events: &SharedEventBridge,
+) {
+    let Some(host) = browser.and_then(|browser| browser.host()) else {
+        return;
+    };
+
+    let mut callback = WindFaviconDownloadCallback::new(request, events.clone());
+    host.download_image(
+        Some(&CefString::from(icon_url)),
+        1,
+        64,
+        0,
+        Some(&mut callback),
+    );
 }
 
 wrap_download_image_callback! {
@@ -835,8 +988,8 @@ mod tests {
         let tabs = BrowserState::with_initial_url("example.com");
         let tab_id = tabs.active_page().tab_id;
         events.track_page(tab_id, 0);
-        let stale_request = events.begin_favicon_request(tab_id);
-        let current_request = events.begin_favicon_request(tab_id);
+        let stale_request = events.begin_preferred_favicon_request(tab_id).unwrap();
+        let current_request = events.begin_preferred_favicon_request(tab_id).unwrap();
 
         events.submit_favicon(stale_request, Some(vec![1]));
         events.submit_favicon(current_request, Some(vec![2]));
@@ -852,12 +1005,66 @@ mod tests {
         let tabs = BrowserState::with_initial_url("example.com");
         let tab_id = tabs.active_page().tab_id;
         events.track_page(tab_id, 0);
-        let stale_request = events.begin_favicon_request(tab_id);
+        let stale_request = events.begin_preferred_favicon_request(tab_id).unwrap();
 
         events.track_page(tab_id, 1);
         events.submit_favicon(stale_request, Some(vec![1]));
 
         assert!(events.take_favicon_updates().is_empty());
+    }
+
+    #[test]
+    fn a_preferred_favicon_suppresses_the_conventional_fallback() {
+        let events = CefEventBridge::default();
+        let tabs = BrowserState::with_initial_url("example.com");
+        let tab_id = tabs.active_page().tab_id;
+        events.track_page(tab_id, 0);
+
+        assert!(events.begin_preferred_favicon_request(tab_id).is_some());
+        assert!(events.begin_fallback_favicon_request(tab_id).is_none());
+    }
+
+    #[test]
+    fn stale_source_discovery_cannot_start_a_request_for_the_new_page() {
+        let events = CefEventBridge::default();
+        let tabs = BrowserState::with_initial_url("example.com");
+        let tab_id = tabs.active_page().tab_id;
+        events.track_page(tab_id, 0);
+        let source_page_revision = events.page_revision(tab_id).unwrap();
+
+        events.track_page(tab_id, 1);
+
+        assert!(
+            events
+                .begin_preferred_favicon_request_for_page(tab_id, source_page_revision)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_conventional_favicon_is_requested_only_once_per_page() {
+        let events = CefEventBridge::default();
+        let tabs = BrowserState::with_initial_url("example.com");
+        let tab_id = tabs.active_page().tab_id;
+        events.track_page(tab_id, 0);
+
+        assert!(events.begin_fallback_favicon_request(tab_id).is_some());
+        assert!(events.begin_fallback_favicon_request(tab_id).is_none());
+    }
+
+    #[test]
+    fn clearing_a_reported_favicon_reaches_the_ui() {
+        let events = CefEventBridge::default();
+        let tabs = BrowserState::with_initial_url("example.com");
+        let tab_id = tabs.active_page().tab_id;
+        events.track_page(tab_id, 0);
+
+        let request = events.begin_favicon_clear_request(tab_id).unwrap();
+        events.submit_favicon(request, None);
+
+        let updates = events.take_favicon_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].png_bytes, None);
     }
 
     #[test]
