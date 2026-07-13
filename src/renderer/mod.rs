@@ -7,7 +7,7 @@ mod cef;
 use eframe::egui;
 
 use crate::{
-    browser::{ActivePage, BrowserState},
+    browser::{ActivePage, BrowserState, Favicon},
     ds::theming::Theme,
 };
 
@@ -133,6 +133,16 @@ impl BrowserRenderer {
     pub fn take_toggle_sidebar_request(&mut self) -> bool {
         self.backend.take_toggle_sidebar_request()
     }
+
+    pub fn sync_tab_metadata(&mut self, browser: &mut BrowserState) {
+        for update in self.backend.take_favicon_updates() {
+            let favicon = update.png_bytes.and_then(|bytes| {
+                let icon = eframe::icon_data::from_png_bytes(&bytes).ok()?;
+                Favicon::from_rgba(icon.width as usize, icon.height as usize, icon.rgba)
+            });
+            browser.set_favicon(update.tab_id, update.page_revision, favicon);
+        }
+    }
 }
 
 impl Default for BrowserRenderer {
@@ -174,6 +184,14 @@ impl RendererBackend {
             Self::Placeholder(_) => false,
             #[cfg(feature = "cef-renderer")]
             Self::Cef(renderer) => renderer.take_toggle_sidebar_request(),
+        }
+    }
+
+    fn take_favicon_updates(&mut self) -> Vec<FaviconUpdate> {
+        match self {
+            Self::Placeholder(_) => Vec::new(),
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.take_favicon_updates(),
         }
     }
 
@@ -223,6 +241,13 @@ impl RendererBackend {
             Self::Cef(renderer) => renderer.tick(),
         }
     }
+}
+
+#[derive(Debug)]
+struct FaviconUpdate {
+    tab_id: crate::browser::TabId,
+    page_revision: u64,
+    png_bytes: Option<Vec<u8>>,
 }
 
 #[cfg(feature = "cef-renderer")]

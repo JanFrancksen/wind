@@ -15,7 +15,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{
     browser::TabId,
-    renderer::{PageTarget, PhysicalRect, RendererStatus},
+    renderer::{FaviconUpdate, PageTarget, PhysicalRect, RendererStatus},
 };
 
 pub struct CefRuntime {
@@ -232,14 +232,27 @@ fn load_cef_library() -> Result<CefLibrary, CefRuntimeError> {
 }
 
 pub struct CefRenderer {
-    shortcuts: SharedShortcutBridge,
+    events: SharedEventBridge,
     tabs: HashMap<TabId, CefTab>,
     closing_tabs: Vec<CefTab>,
     active_tab: Option<TabId>,
     surface_visible: bool,
 }
 
-type SharedShortcutBridge = Rc<ShortcutBridge>;
+type SharedEventBridge = Rc<CefEventBridge>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FaviconRequest {
+    tab_id: TabId,
+    page_revision: u64,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FaviconRequestState {
+    page_revision: u64,
+    generation: u64,
+}
 
 #[derive(Default)]
 struct BrowserSlot {
@@ -252,12 +265,14 @@ struct BrowserSlot {
 type SharedBrowser = Rc<RefCell<BrowserSlot>>;
 
 #[derive(Default)]
-struct ShortcutBridge {
+struct CefEventBridge {
     toggle_sidebar_requested: Cell<bool>,
+    favicon_requests: RefCell<HashMap<TabId, FaviconRequestState>>,
+    favicon_updates: RefCell<Vec<FaviconUpdate>>,
     repaint_context: RefCell<Option<eframe::egui::Context>>,
 }
 
-impl ShortcutBridge {
+impl CefEventBridge {
     fn request_toggle_sidebar(&self) {
         self.toggle_sidebar_requested.set(true);
         if let Some(context) = self.repaint_context.borrow().as_ref() {
@@ -267,6 +282,70 @@ impl ShortcutBridge {
 
     fn take_toggle_sidebar_request(&self) -> bool {
         self.toggle_sidebar_requested.replace(false)
+    }
+
+    fn track_page(&self, tab_id: TabId, page_revision: u64) {
+        let mut requests = self.favicon_requests.borrow_mut();
+        let entry = requests.entry(tab_id).or_insert(FaviconRequestState {
+            page_revision,
+            generation: 0,
+        });
+        if entry.page_revision != page_revision {
+            *entry = FaviconRequestState {
+                page_revision,
+                generation: entry.generation + 1,
+            };
+        }
+    }
+
+    fn begin_favicon_request(&self, tab_id: TabId) -> FaviconRequest {
+        let mut requests = self.favicon_requests.borrow_mut();
+        let entry = requests.entry(tab_id).or_default();
+        entry.generation += 1;
+        FaviconRequest {
+            tab_id,
+            page_revision: entry.page_revision,
+            generation: entry.generation,
+        }
+    }
+
+    fn submit_favicon(&self, request: FaviconRequest, png_bytes: Option<Vec<u8>>) {
+        let is_current = self
+            .favicon_requests
+            .borrow()
+            .get(&request.tab_id)
+            .is_some_and(|current| {
+                *current
+                    == FaviconRequestState {
+                        page_revision: request.page_revision,
+                        generation: request.generation,
+                    }
+            });
+        if !is_current {
+            return;
+        }
+
+        self.favicon_updates.borrow_mut().push(FaviconUpdate {
+            tab_id: request.tab_id,
+            page_revision: request.page_revision,
+            png_bytes,
+        });
+        if let Some(context) = self.repaint_context.borrow().as_ref() {
+            context.request_repaint();
+        }
+    }
+
+    fn retain_tabs(&self, live_tabs: &HashSet<TabId>) {
+        self.favicon_requests
+            .borrow_mut()
+            .retain(|tab_id, _| live_tabs.contains(tab_id));
+        self.favicon_updates
+            .borrow_mut()
+            .retain(|update| live_tabs.contains(&update.tab_id));
+    }
+
+    fn take_favicon_updates(&self) -> Vec<FaviconUpdate> {
+        std::mem::take(&mut *self.favicon_updates.borrow_mut())
     }
 }
 
@@ -288,7 +367,7 @@ struct CefTab {
 impl CefRenderer {
     pub fn new() -> Self {
         Self {
-            shortcuts: Rc::new(ShortcutBridge::default()),
+            events: Rc::new(CefEventBridge::default()),
             tabs: HashMap::new(),
             closing_tabs: Vec::new(),
             active_tab: None,
@@ -364,15 +443,20 @@ impl CefRenderer {
     }
 
     pub fn set_repaint_context(&self, context: &eframe::egui::Context) {
-        *self.shortcuts.repaint_context.borrow_mut() = Some(context.clone());
+        *self.events.repaint_context.borrow_mut() = Some(context.clone());
     }
 
     pub fn take_toggle_sidebar_request(&self) -> bool {
-        self.shortcuts.take_toggle_sidebar_request()
+        self.events.take_toggle_sidebar_request()
+    }
+
+    pub fn take_favicon_updates(&self) -> Vec<FaviconUpdate> {
+        self.events.take_favicon_updates()
     }
 
     pub fn sync_tabs(&mut self, tab_ids: impl IntoIterator<Item = TabId>) {
         let live_tabs = tab_ids.into_iter().collect::<HashSet<_>>();
+        self.events.retain_tabs(&live_tabs);
         self.closing_tabs.retain(|tab| !tab.browser.borrow().closed);
 
         let closing_tab_ids = self
@@ -405,6 +489,8 @@ impl CefRenderer {
     }
 
     fn create_browser(&mut self, parent: cef_window_handle_t, target: &PageTarget) -> bool {
+        self.events
+            .track_page(target.page.tab_id, target.page.render_revision);
         let bounds = cef_rect(target.bounds);
         let window_info = hidden_child_window_info(parent, &bounds);
         let settings = BrowserSettings::default();
@@ -413,7 +499,8 @@ impl CefRenderer {
         // background tab cannot flash before the next egui frame synchronizes
         // the active tab's visibility.
         let browser = Rc::new(RefCell::new(BrowserSlot::default()));
-        let mut client = WindCefClient::new(browser.clone(), self.shortcuts.clone());
+        let mut client =
+            WindCefClient::new(browser.clone(), self.events.clone(), target.page.tab_id);
         let created = browser_host_create_browser(
             Some(&window_info),
             Some(&mut client),
@@ -453,6 +540,7 @@ impl CefRenderer {
             tab.loaded.url != target.page.url || tab.loaded.revision != target.page.render_revision;
 
         if should_load {
+            self.events.track_page(tab_id, target.page.render_revision);
             if let Some(frame) = browser.main_frame() {
                 frame.load_url(Some(&CefString::from(target.page.url.as_str())));
             }
@@ -520,7 +608,8 @@ wrap_app! {
 wrap_client! {
     struct WindCefClient {
         browser: SharedBrowser,
-        shortcuts: SharedShortcutBridge,
+        events: SharedEventBridge,
+        tab_id: TabId,
     }
 
     impl Client {
@@ -529,14 +618,85 @@ wrap_client! {
         }
 
         fn keyboard_handler(&self) -> Option<KeyboardHandler> {
-            Some(WindKeyboardHandler::new(self.shortcuts.clone()))
+            Some(WindKeyboardHandler::new(self.events.clone()))
+        }
+
+        fn display_handler(&self) -> Option<DisplayHandler> {
+            Some(WindDisplayHandler::new(
+                self.tab_id,
+                self.events.clone(),
+            ))
         }
     }
 }
 
+wrap_display_handler! {
+    struct WindDisplayHandler {
+        tab_id: TabId,
+        events: SharedEventBridge,
+    }
+
+    impl DisplayHandler {
+        fn on_favicon_urlchange(
+            &self,
+            browser: Option<&mut Browser>,
+            icon_urls: Option<&mut CefStringList>,
+        ) {
+            let request = self.events.begin_favicon_request(self.tab_id);
+            let icon_url = icon_urls
+                .and_then(|urls| urls.clone().into_iter().next())
+                .filter(|url| !url.is_empty());
+            let Some(icon_url) = icon_url else {
+                self.events.submit_favicon(request, None);
+                return;
+            };
+            let Some(host) = browser.and_then(|browser| browser.host()) else {
+                return;
+            };
+
+            let mut callback =
+                WindFaviconDownloadCallback::new(request, self.events.clone());
+            host.download_image(
+                Some(&CefString::from(icon_url.as_str())),
+                1,
+                64,
+                0,
+                Some(&mut callback),
+            );
+        }
+    }
+}
+
+wrap_download_image_callback! {
+    struct WindFaviconDownloadCallback {
+        request: FaviconRequest,
+        events: SharedEventBridge,
+    }
+
+    impl DownloadImageCallback {
+        fn on_download_image_finished(
+            &self,
+            _image_url: Option<&CefString>,
+            _http_status_code: std::os::raw::c_int,
+            image: Option<&mut Image>,
+        ) {
+            let png_bytes = image.and_then(favicon_png_bytes);
+            self.events.submit_favicon(self.request, png_bytes);
+        }
+    }
+}
+
+fn favicon_png_bytes(image: &mut Image) -> Option<Vec<u8>> {
+    let png = image.as_png(1.0, 1, None, None)?;
+    let mut bytes = vec![0; png.size()];
+    let written = png.data(Some(&mut bytes), 0);
+    bytes.truncate(written);
+    (!bytes.is_empty()).then_some(bytes)
+}
+
 wrap_keyboard_handler! {
     struct WindKeyboardHandler {
-        shortcuts: SharedShortcutBridge,
+        events: SharedEventBridge,
     }
 
     impl KeyboardHandler {
@@ -548,7 +708,7 @@ wrap_keyboard_handler! {
             _is_keyboard_shortcut: Option<&mut std::os::raw::c_int>,
         ) -> std::os::raw::c_int {
             if event.is_some_and(is_toggle_sidebar_shortcut) {
-                self.shortcuts.request_toggle_sidebar();
+                self.events.request_toggle_sidebar();
                 return 1;
             }
 
@@ -635,7 +795,7 @@ fn is_toggle_sidebar_shortcut(event: &KeyEvent) -> bool {
 }
 
 #[cfg(test)]
-mod shortcut_tests {
+mod tests {
     use super::*;
     use crate::browser::BrowserState;
 
@@ -653,7 +813,7 @@ mod shortcut_tests {
 
     #[test]
     fn focused_browser_shortcut_queues_one_sidebar_toggle() {
-        let shortcuts = ShortcutBridge::default();
+        let events = CefEventBridge::default();
         let event = KeyEvent {
             type_: KeyEventType::RAWKEYDOWN,
             modifiers: cef::sys::cef_event_flags_t::EVENTFLAG_COMMAND_DOWN.0,
@@ -662,11 +822,42 @@ mod shortcut_tests {
         };
 
         if is_toggle_sidebar_shortcut(&event) {
-            shortcuts.request_toggle_sidebar();
+            events.request_toggle_sidebar();
         }
 
-        assert!(shortcuts.take_toggle_sidebar_request());
-        assert!(!shortcuts.take_toggle_sidebar_request());
+        assert!(events.take_toggle_sidebar_request());
+        assert!(!events.take_toggle_sidebar_request());
+    }
+
+    #[test]
+    fn stale_favicon_requests_do_not_reach_the_ui() {
+        let events = CefEventBridge::default();
+        let tabs = BrowserState::with_initial_url("example.com");
+        let tab_id = tabs.active_page().tab_id;
+        events.track_page(tab_id, 0);
+        let stale_request = events.begin_favicon_request(tab_id);
+        let current_request = events.begin_favicon_request(tab_id);
+
+        events.submit_favicon(stale_request, Some(vec![1]));
+        events.submit_favicon(current_request, Some(vec![2]));
+
+        let updates = events.take_favicon_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].png_bytes, Some(vec![2]));
+    }
+
+    #[test]
+    fn navigation_invalidates_an_in_flight_favicon_request() {
+        let events = CefEventBridge::default();
+        let tabs = BrowserState::with_initial_url("example.com");
+        let tab_id = tabs.active_page().tab_id;
+        events.track_page(tab_id, 0);
+        let stale_request = events.begin_favicon_request(tab_id);
+
+        events.track_page(tab_id, 1);
+        events.submit_favicon(stale_request, Some(vec![1]));
+
+        assert!(events.take_favicon_updates().is_empty());
     }
 
     #[test]

@@ -25,7 +25,34 @@ pub struct Tab {
     pub history_index: usize,
     pub pinned: bool,
     pub highlighted: bool,
+    pub favicon: Option<Favicon>,
+    pub favicon_revision: u64,
     pub render_revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Favicon {
+    width: usize,
+    height: usize,
+    rgba: Vec<u8>,
+}
+
+impl Favicon {
+    pub fn from_rgba(width: usize, height: usize, rgba: Vec<u8>) -> Option<Self> {
+        (width > 0 && height > 0 && rgba.len() == width * height * 4).then_some(Self {
+            width,
+            height,
+            rgba,
+        })
+    }
+
+    pub fn size(&self) -> [usize; 2] {
+        [self.width, self.height]
+    }
+
+    pub fn rgba(&self) -> &[u8] {
+        &self.rgba
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,6 +138,8 @@ impl BrowserState {
             history_index: 0,
             pinned: false,
             highlighted: false,
+            favicon: None,
+            favicon_revision: 0,
             render_revision: 0,
         });
         self.active_tab = self.tabs.len() - 1;
@@ -210,9 +239,21 @@ impl BrowserState {
         tab.history.truncate(tab.history_index + 1);
         tab.history.push(url.clone());
         tab.history_index = tab.history.len() - 1;
-        tab.url = url.clone();
-        tab.title = title_for_url(&url);
-        tab.render_revision += 1;
+        update_tab_location(tab, url);
+    }
+
+    pub fn set_favicon(&mut self, tab_id: TabId, page_revision: u64, favicon: Option<Favicon>) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if tab.render_revision != page_revision {
+            return;
+        }
+
+        if tab.favicon != favicon {
+            tab.favicon = favicon;
+            tab.favicon_revision += 1;
+        }
     }
 
     pub fn can_go_back(&self) -> bool {
@@ -228,9 +269,8 @@ impl BrowserState {
         if self.can_go_back() {
             let tab = &mut self.tabs[self.active_tab];
             tab.history_index -= 1;
-            tab.url = tab.history[tab.history_index].clone();
-            tab.title = title_for_url(&tab.url);
-            tab.render_revision += 1;
+            let url = tab.history[tab.history_index].clone();
+            update_tab_location(tab, url);
         }
     }
 
@@ -238,9 +278,8 @@ impl BrowserState {
         if self.can_go_forward() {
             let tab = &mut self.tabs[self.active_tab];
             tab.history_index += 1;
-            tab.url = tab.history[tab.history_index].clone();
-            tab.title = title_for_url(&tab.url);
-            tab.render_revision += 1;
+            let url = tab.history[tab.history_index].clone();
+            update_tab_location(tab, url);
         }
     }
 
@@ -294,6 +333,8 @@ impl BrowserState {
             history_index: 0,
             pinned: false,
             highlighted: false,
+            favicon: None,
+            favicon_revision: 0,
             render_revision: 0,
         }
     }
@@ -331,6 +372,19 @@ impl BrowserState {
         self.tabs.swap(current, target);
         self.active_tab = target;
     }
+}
+
+fn clear_favicon(tab: &mut Tab) {
+    if tab.favicon.take().is_some() {
+        tab.favicon_revision += 1;
+    }
+}
+
+fn update_tab_location(tab: &mut Tab, url: String) {
+    tab.url = url;
+    tab.title = title_for_url(&tab.url);
+    clear_favicon(tab);
+    tab.render_revision += 1;
 }
 
 pub fn parse_address_action(input: &str) -> AddressAction {
@@ -417,7 +471,7 @@ fn title_for_url(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddressAction, BrowserState, normalize_url, parse_address_action};
+    use super::{AddressAction, BrowserState, Favicon, normalize_url, parse_address_action};
 
     #[test]
     fn normalizes_searches_and_domains() {
@@ -538,5 +592,33 @@ mod tests {
         browser.move_active_tab_down();
         assert_eq!(browser.active_page().tab_id, first);
         assert_eq!(browser.tab_ids().collect::<Vec<_>>(), vec![second, first]);
+    }
+
+    #[test]
+    fn favicon_updates_follow_the_tab_and_navigation_clears_them() {
+        let mut browser = BrowserState::with_initial_url("example.com");
+        let tab_id = browser.active_page().tab_id;
+        let favicon = Favicon::from_rgba(1, 1, vec![10, 20, 30, 255]).unwrap();
+
+        browser.set_favicon(tab_id, 0, Some(favicon.clone()));
+        assert_eq!(browser.active_tab().favicon, Some(favicon));
+        assert_eq!(browser.active_tab().favicon_revision, 1);
+
+        browser.navigate_active("rust-lang.org");
+        assert_eq!(browser.active_tab().favicon, None);
+        assert_eq!(browser.active_tab().favicon_revision, 2);
+    }
+
+    #[test]
+    fn ignores_a_favicon_download_from_an_old_page_revision() {
+        let mut browser = BrowserState::with_initial_url("example.com");
+        let tab_id = browser.active_page().tab_id;
+        browser.navigate_active("rust-lang.org");
+
+        let stale_favicon = Favicon::from_rgba(1, 1, vec![10, 20, 30, 255]).unwrap();
+        browser.set_favicon(tab_id, 0, Some(stale_favicon));
+
+        assert_eq!(browser.active_tab().favicon, None);
+        assert_eq!(browser.active_tab().favicon_revision, 0);
     }
 }

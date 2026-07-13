@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use crate::{
-    browser::BrowserState,
+    browser::{BrowserState, Tab},
     ds::{
         components::{DsButton, Icon, TabButton, divider},
         theming::Theme,
@@ -104,7 +104,7 @@ fn highlighted_pinned_tabs(
         .show(ui, |ui| {
             for (tile_index, (tab_index, tab)) in highlighted_tabs.iter().enumerate() {
                 let is_active = browser.active_index() == *tab_index;
-                let response = highlighted_pin_tile(ui, &tab.title, is_active, tile_size, theme);
+                let response = highlighted_pin_tile(ui, tab, is_active, tile_size, theme);
 
                 if response.clicked() {
                     selected_tab = Some(*tab_index);
@@ -148,7 +148,7 @@ fn highlighted_pinned_tabs(
 
 fn highlighted_pin_tile(
     ui: &mut egui::Ui,
-    title: &str,
+    tab: &Tab,
     selected: bool,
     size: f32,
     theme: &Theme,
@@ -172,14 +172,59 @@ fn highlighted_pin_tile(
         egui::Stroke::new(theme.tokens.primitive.stroke.hairline, stroke_color),
         egui::StrokeKind::Inside,
     );
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        tile_label(title),
-        egui::FontId::proportional(theme.tokens.primitive.typography.body_strong),
-        color.text_strong,
-    );
+    if let Some(texture) = highlighted_favicon_texture(ui, tab) {
+        let image_size = (size * 0.5).clamp(20.0, 36.0);
+        let image_rect = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(image_size));
+        egui::Image::new(&texture)
+            .corner_radius(theme.tokens.primitive.radius.sm)
+            .paint_at(ui, image_rect);
+    } else {
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            tile_label(&tab.title),
+            egui::FontId::proportional(theme.tokens.primitive.typography.body_strong),
+            color.text_strong,
+        );
+    }
     response
+}
+
+#[derive(Clone)]
+struct CachedFavicon {
+    revision: u64,
+    texture: egui::TextureHandle,
+}
+
+fn highlighted_favicon_texture(ui: &egui::Ui, tab: &Tab) -> Option<egui::TextureHandle> {
+    let favicon = tab.favicon.as_ref()?;
+    let cache_id = egui::Id::new(("highlighted_favicon", tab.id));
+
+    if let Some(cached) = ui
+        .ctx()
+        .data(|data| data.get_temp::<CachedFavicon>(cache_id))
+        && cached.revision == tab.favicon_revision
+    {
+        return Some(cached.texture);
+    }
+
+    let image = egui::ColorImage::from_rgba_unmultiplied(favicon.size(), favicon.rgba());
+    let texture = ui.ctx().load_texture(
+        format!("highlighted-favicon-{:?}", tab.id),
+        image,
+        egui::TextureOptions::LINEAR,
+    );
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(
+            cache_id,
+            CachedFavicon {
+                revision: tab.favicon_revision,
+                texture: texture.clone(),
+            },
+        );
+    });
+
+    Some(texture)
 }
 
 fn tile_label(title: &str) -> String {

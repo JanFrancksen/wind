@@ -22,6 +22,7 @@ pub fn show_root(
     // future top navbar.
     let full_rect = ui.available_rect_before_wrap();
     paint_app_backdrop(ui, full_rect, theme);
+    renderer.sync_tab_metadata(browser);
     if renderer.take_toggle_sidebar_request() {
         *sidebar_collapsed = !*sidebar_collapsed;
     }
