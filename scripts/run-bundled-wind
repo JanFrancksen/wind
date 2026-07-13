@@ -18,7 +18,13 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target_directory="$(dirname "$app_binary")"
 bundle="$target_directory/bundle/wind.app"
 inputs_file="$bundle/Contents/Resources/.wind-cef-inputs"
-codesign_identity="${WIND_CODESIGN_IDENTITY:--}"
+codesign_identity="${WIND_CODESIGN_IDENTITY:-}"
+if [[ -z "$codesign_identity" ]]; then
+  codesign_identity="$({
+    security find-identity -v -p codesigning 2>/dev/null || true
+  } | awk 'found == 0 && /"Apple Development:/ { print $2; found = 1 }')"
+fi
+codesign_identity="${codesign_identity:--}"
 
 build_binary() {
   if [[ "$(basename "$target_directory")" == "release" ]]; then

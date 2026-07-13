@@ -17,8 +17,14 @@ To deliberately rebuild the bundle, remove `target/debug/bundle/wind.app` and
 run `cargo run` again.
 
 CEF subprocesses require a real Apple development signature on recent macOS
-releases. Configure one before running locally (find its exact name with
-`security find-identity -v -p codesigning`):
+releases. Wind automatically uses the first `Apple Development` identity in the
+login keychain. Confirm Xcode created one with:
+
+```sh
+security find-identity -v -p codesigning
+```
+
+To select a different identity explicitly, set its exact name:
 
 ```sh
 export WIND_CODESIGN_IDENTITY='Apple Development: Your Name (TEAMID)'
