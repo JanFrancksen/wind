@@ -98,7 +98,8 @@ fn handle_shortcuts(ui: &mut egui::Ui, browser: &mut BrowserState, address_input
     if reopen_closed {
         browser.reopen_closed_tab();
     } else if new_tab {
-        browser.add_tab("arc://new-tab");
+        super::open_new_tab(browser, address_input);
+        return;
     } else if close_tab {
         browser.close_active_tab();
     } else if reload {

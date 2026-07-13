@@ -4,7 +4,10 @@ mod toolbar;
 use eframe::egui;
 
 use crate::{
-    browser::BrowserState, ds::components::Surface, ds::theming::Theme, renderer::BrowserRenderer,
+    browser::BrowserState,
+    ds::components::Surface,
+    ds::theming::Theme,
+    renderer::{AppShortcut, BrowserRenderer},
 };
 
 pub fn show_root(
@@ -23,8 +26,11 @@ pub fn show_root(
     let full_rect = ui.available_rect_before_wrap();
     paint_app_backdrop(ui, full_rect, theme);
     renderer.sync_tab_metadata(browser);
-    if renderer.take_toggle_sidebar_request() {
-        *sidebar_collapsed = !*sidebar_collapsed;
+    for shortcut in renderer.take_shortcut_requests() {
+        match shortcut {
+            AppShortcut::ToggleSidebar => *sidebar_collapsed = !*sidebar_collapsed,
+            AppShortcut::NewTab => open_new_tab(browser, address_input),
+        }
     }
     handle_sidebar_shortcut(ui, sidebar_collapsed);
 
@@ -71,6 +77,11 @@ pub fn show_root(
             full_rect.height(),
         );
     }
+}
+
+fn open_new_tab(browser: &mut BrowserState, address_input: &mut String) {
+    browser.add_tab("arc://new-tab");
+    *address_input = browser.active_url_for_input();
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

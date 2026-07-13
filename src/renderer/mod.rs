@@ -21,6 +21,12 @@ pub enum RendererStatus {
     Unavailable(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppShortcut {
+    ToggleSidebar,
+    NewTab,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageTarget {
     pub page: ActivePage,
@@ -145,8 +151,8 @@ impl BrowserRenderer {
         self.backend.tick();
     }
 
-    pub fn take_toggle_sidebar_request(&mut self) -> bool {
-        self.backend.take_toggle_sidebar_request()
+    pub fn take_shortcut_requests(&mut self) -> Vec<AppShortcut> {
+        self.backend.take_shortcut_requests()
     }
 
     pub fn sync_tab_metadata(&mut self, browser: &mut BrowserState) {
@@ -196,11 +202,11 @@ impl RendererBackend {
         }
     }
 
-    fn take_toggle_sidebar_request(&mut self) -> bool {
+    fn take_shortcut_requests(&mut self) -> Vec<AppShortcut> {
         match self {
-            Self::Placeholder(_) => false,
+            Self::Placeholder(_) => Vec::new(),
             #[cfg(feature = "cef-renderer")]
-            Self::Cef(renderer) => renderer.take_toggle_sidebar_request(),
+            Self::Cef(renderer) => renderer.take_shortcut_requests(),
         }
     }
 

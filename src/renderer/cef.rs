@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::{HashMap, HashSet},
     error::Error,
     fmt,
@@ -16,8 +16,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use crate::{
     browser::{Favicon, TabId},
     renderer::{
-        FaviconUpdate, PageTarget, PageTitleUpdate, PageUrlUpdate, PhysicalRect, RendererStatus,
-        favicon,
+        AppShortcut, FaviconUpdate, PageTarget, PageTitleUpdate, PageUrlUpdate, PhysicalRect,
+        RendererStatus, favicon,
     },
 };
 
@@ -274,7 +274,7 @@ type SharedBrowser = Rc<RefCell<BrowserSlot>>;
 
 #[derive(Default)]
 struct CefEventBridge {
-    toggle_sidebar_requested: Cell<bool>,
+    shortcut_requests: RefCell<Vec<AppShortcut>>,
     favicon_requests: RefCell<HashMap<TabId, FaviconRequestState>>,
     favicon_updates: RefCell<Vec<FaviconUpdate>>,
     page_url_updates: RefCell<Vec<PageUrlUpdate>>,
@@ -283,15 +283,15 @@ struct CefEventBridge {
 }
 
 impl CefEventBridge {
-    fn request_toggle_sidebar(&self) {
-        self.toggle_sidebar_requested.set(true);
+    fn request_shortcut(&self, shortcut: AppShortcut) {
+        self.shortcut_requests.borrow_mut().push(shortcut);
         if let Some(context) = self.repaint_context.borrow().as_ref() {
             context.request_repaint();
         }
     }
 
-    fn take_toggle_sidebar_request(&self) -> bool {
-        self.toggle_sidebar_requested.replace(false)
+    fn take_shortcut_requests(&self) -> Vec<AppShortcut> {
+        self.shortcut_requests.take()
     }
 
     fn track_page(&self, tab_id: TabId, page_revision: u64) {
@@ -551,8 +551,8 @@ impl CefRenderer {
         *self.events.repaint_context.borrow_mut() = Some(context.clone());
     }
 
-    pub fn take_toggle_sidebar_request(&self) -> bool {
-        self.events.take_toggle_sidebar_request()
+    pub fn take_shortcut_requests(&self) -> Vec<AppShortcut> {
+        self.events.take_shortcut_requests()
     }
 
     pub fn take_favicon_updates(&self) -> Vec<FaviconUpdate> {
@@ -949,8 +949,8 @@ wrap_keyboard_handler! {
             _os_event: *mut u8,
             _is_keyboard_shortcut: Option<&mut std::os::raw::c_int>,
         ) -> std::os::raw::c_int {
-            if event.is_some_and(is_toggle_sidebar_shortcut) {
-                self.events.request_toggle_sidebar();
+            if let Some(shortcut) = event.and_then(app_shortcut) {
+                self.events.request_shortcut(shortcut);
                 return 1;
             }
 
@@ -1016,7 +1016,7 @@ fn hidden_child_window_info(parent: cef_window_handle_t, bounds: &Rect) -> Windo
     window_info
 }
 
-fn is_toggle_sidebar_shortcut(event: &KeyEvent) -> bool {
+fn app_shortcut(event: &KeyEvent) -> Option<AppShortcut> {
     #[cfg(target_os = "linux")]
     let is_key_down = event.type_ == KeyEventType::KEYDOWN;
     #[cfg(not(target_os = "linux"))]
@@ -1030,10 +1030,18 @@ fn is_toggle_sidebar_shortcut(event: &KeyEvent) -> bool {
     let excluded_modifiers = cef::sys::cef_event_flags_t::EVENTFLAG_SHIFT_DOWN.0
         | cef::sys::cef_event_flags_t::EVENTFLAG_ALT_DOWN.0;
 
-    is_key_down
-        && event.windows_key_code == i32::from(b'S')
-        && event.modifiers & command_flag != 0
-        && event.modifiers & excluded_modifiers == 0
+    if !is_key_down
+        || event.modifiers & command_flag == 0
+        || event.modifiers & excluded_modifiers != 0
+    {
+        return None;
+    }
+
+    match u8::try_from(event.windows_key_code).ok()? {
+        b'S' => Some(AppShortcut::ToggleSidebar),
+        b'T' => Some(AppShortcut::NewTab),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1054,7 +1062,40 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(is_toggle_sidebar_shortcut(&event));
+        assert_eq!(app_shortcut(&event), Some(AppShortcut::ToggleSidebar));
+    }
+
+    #[test]
+    fn command_t_from_the_focused_browser_is_an_app_shortcut() {
+        let event = KeyEvent {
+            type_: KeyEventType::RAWKEYDOWN,
+            modifiers: cef::sys::cef_event_flags_t::EVENTFLAG_COMMAND_DOWN.0,
+            windows_key_code: i32::from(b'T'),
+            ..Default::default()
+        };
+
+        assert_eq!(app_shortcut(&event), Some(AppShortcut::NewTab));
+    }
+
+    #[test]
+    fn focused_browser_new_tab_shortcuts_are_not_collapsed() {
+        let events = CefEventBridge::default();
+        let event = KeyEvent {
+            type_: KeyEventType::RAWKEYDOWN,
+            modifiers: cef::sys::cef_event_flags_t::EVENTFLAG_COMMAND_DOWN.0,
+            windows_key_code: i32::from(b'T'),
+            ..Default::default()
+        };
+
+        let shortcut = app_shortcut(&event).unwrap();
+        events.request_shortcut(shortcut);
+        events.request_shortcut(shortcut);
+
+        assert_eq!(
+            events.take_shortcut_requests(),
+            vec![AppShortcut::NewTab, AppShortcut::NewTab]
+        );
+        assert!(events.take_shortcut_requests().is_empty());
     }
 
     #[test]
@@ -1067,12 +1108,14 @@ mod tests {
             ..Default::default()
         };
 
-        if is_toggle_sidebar_shortcut(&event) {
-            events.request_toggle_sidebar();
-        }
+        let shortcut = app_shortcut(&event).unwrap();
+        events.request_shortcut(shortcut);
 
-        assert!(events.take_toggle_sidebar_request());
-        assert!(!events.take_toggle_sidebar_request());
+        assert_eq!(
+            events.take_shortcut_requests(),
+            vec![AppShortcut::ToggleSidebar]
+        );
+        assert!(events.take_shortcut_requests().is_empty());
     }
 
     #[test]
