@@ -2,6 +2,7 @@ use eframe::egui;
 
 mod browser;
 mod ds;
+mod native_menu;
 mod renderer;
 mod ui;
 
@@ -53,6 +54,9 @@ impl eframe::App for BrowserApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if let Some(appearance) = native_menu::take_theme_request() {
+            self.theme = Theme::wind(appearance);
+        }
         self.theme.apply(ui.ctx());
         ui::show_root(
             ui,
@@ -106,7 +110,9 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(BrowserApp::new(cef_available)))
+            let app = BrowserApp::new(cef_available);
+            native_menu::install(&cc.egui_ctx, app.theme.appearance);
+            Ok(Box::new(app))
         }),
     );
 

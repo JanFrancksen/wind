@@ -6,7 +6,6 @@ pub enum Icon {
     ArrowRight,
     ChevronDown,
     ChevronUp,
-    Command,
     Pin,
     Plus,
     Reload,
@@ -28,7 +27,6 @@ impl Icon {
                 egui::include_image!("../../assets/icons/tabler/chevron-down.svg")
             }
             Icon::ChevronUp => egui::include_image!("../../assets/icons/tabler/chevron-up.svg"),
-            Icon::Command => egui::include_image!("../../assets/icons/tabler/command.svg"),
             Icon::Pin => egui::include_image!("../../assets/icons/tabler/pin.svg"),
             Icon::Plus => egui::include_image!("../../assets/icons/tabler/plus.svg"),
             Icon::Reload => egui::include_image!("../../assets/icons/tabler/reload.svg"),

@@ -132,6 +132,8 @@ fn show_animated_sidebar(
         let vertical_margin = theme.tokens.primitive.space.lg * 2.0;
         ui.set_min_height((animation.rect.height() - vertical_margin).max(0.0));
         if sidebar::show(ui, browser, address_input, theme, sidebar_collapsed) {
+            // The sidebar fallback is only rendered outside macOS, where the
+            // native application menu is unavailable.
             *theme = theme.toggled();
         }
     });

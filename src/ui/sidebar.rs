@@ -43,7 +43,7 @@ pub fn show(
     sidebar_collapsed: &mut bool,
 ) -> bool {
     let space = &theme.tokens.primitive.space;
-    let color = &theme.tokens.semantic.color;
+    #[cfg(not(target_os = "macos"))]
     let mut toggle_theme = false;
 
     toolbar::show_compact(ui, browser, address_input, theme, sidebar_collapsed);
@@ -54,6 +54,9 @@ pub fn show(
 
     ui.add_space(space.lg);
     highlighted_pinned_tabs(ui, browser, theme, dragging, &mut drop_target, &mut actions);
+
+    divider(ui, theme);
+    tab_sections(ui, browser, theme, dragging, &mut drop_target, &mut actions);
 
     ui.add_space(space.sm);
     if DsButton::new("New Tab")
@@ -66,9 +69,6 @@ pub fn show(
         browser.add_tab("arc://new-tab");
         *address_input = browser.active_url_for_input();
     }
-
-    divider(ui, theme);
-    tab_sections(ui, browser, theme, dragging, &mut drop_target, &mut actions);
 
     apply_sidebar_actions(browser, address_input, actions);
 
@@ -84,36 +84,27 @@ pub fn show(
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-        ui.add_space(space.sm);
-        ui.horizontal(|ui| {
-            DsButton::icon(Icon::X)
-                .ghost()
-                .small()
-                .width(theme.tokens.component.tab.close_size)
-                .show(ui, theme);
-            if DsButton::new(theme.appearance_label())
-                .leading_icon(Icon::Command)
-                .ghost()
-                .small()
-                .width(110.0)
-                .show(ui, theme)
-                .clicked()
-            {
-                toggle_theme = true;
-            }
-        });
-        ui.add_space(space.sm);
-        divider(ui, theme);
-        ui.add_space(space.sm);
-        ui.label(
-            egui::RichText::new("Wind Browser")
-                .color(color.text_muted)
-                .size(theme.tokens.primitive.typography.caption),
-        );
+        if DsButton::new("Toggle Theme")
+            .ghost()
+            .small()
+            .width(ui.available_width())
+            .show(ui, theme)
+            .clicked()
+        {
+            toggle_theme = true;
+        }
     });
 
-    toggle_theme
+    #[cfg(target_os = "macos")]
+    {
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        toggle_theme
+    }
 }
 
 fn highlighted_pinned_tabs(
@@ -465,8 +456,6 @@ fn tab_sections(
     drop_target: &mut Option<DropTarget>,
     actions: &mut SidebarActions,
 ) {
-    let space = &theme.tokens.primitive.space;
-    let color = &theme.tokens.semantic.color;
     let has_pinned_tabs = browser.tabs().iter().any(|tab| tab.pinned);
 
     tab_row_group(
@@ -492,13 +481,6 @@ fn tab_sections(
         dragging,
         drop_target,
         actions,
-    );
-
-    ui.add_space(space.sm);
-    ui.label(
-        egui::RichText::new(format!("{} open", browser.tabs().len()))
-            .color(color.text_muted)
-            .size(theme.tokens.primitive.typography.caption),
     );
 }
 

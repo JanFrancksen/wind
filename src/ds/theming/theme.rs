@@ -33,13 +33,6 @@ impl Theme {
         })
     }
 
-    pub fn appearance_label(&self) -> &'static str {
-        match self.appearance {
-            ThemeAppearance::Alpine => "Alpine",
-            ThemeAppearance::Night => "Night",
-        }
-    }
-
     fn alpine() -> Self {
         let color = ColorPrimitives {
             neutral_0: egui::Color32::from_rgb(255, 255, 255),
