@@ -652,8 +652,11 @@ fn paint_tab_row_at(
             .max(theme.tokens.component.button.height_sm);
         let spacing = theme.tokens.primitive.space.xs;
         let is_away_from_pin = tab_is_away_from_pin(tab);
-        let action_count = if is_away_from_pin { 2.0 } else { 1.0 };
-        let actions_width = (action_size * action_count) + (spacing * action_count);
+        let actions_width = if is_away_from_pin {
+            action_size + spacing
+        } else {
+            0.0
+        };
         let tab_width = (row_rect.width() - actions_width).max(0.0);
         let row_hovered = ui.rect_contains_pointer(row_rect);
         let mut row_ui = ui.new_child(
@@ -667,6 +670,7 @@ fn paint_tab_row_at(
         let tab_response = TabButton::new(&tab.title)
             .favicon(favicon.as_ref())
             .selected(is_active)
+            .close_visible(row_hovered)
             .width(tab_width)
             .show(&mut row_ui, theme);
         tab_response.dnd_set_drag_payload(DraggedTab { id: tab.id });
@@ -688,18 +692,28 @@ fn paint_tab_row_at(
             actions.returned = Some(tab.id);
         }
         if row_hovered {
+            let close_rect = egui::Rect::from_center_size(
+                egui::pos2(
+                    tab_response.rect.right() - spacing - action_size * 0.5,
+                    tab_response.rect.center().y,
+                ),
+                egui::Vec2::splat(action_size),
+            );
+            let mut close_ui = row_ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(close_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
             if DsButton::icon(Icon::X)
                 .ghost()
                 .small()
                 .width(action_size)
-                .show(&mut row_ui, theme)
+                .show(&mut close_ui, theme)
                 .on_hover_text("Close tab")
                 .clicked()
             {
                 actions.closed = Some(tab.id);
             }
-        } else {
-            row_ui.add_space(action_size);
         }
     });
 }
