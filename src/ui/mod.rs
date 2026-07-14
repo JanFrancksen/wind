@@ -182,46 +182,8 @@ fn invisible_sidebar_resize_handle(
 }
 
 fn paint_app_backdrop(ui: &mut egui::Ui, rect: egui::Rect, theme: &Theme) {
-    let color = &theme.tokens.semantic.color;
-    let painter = ui.painter();
-    let steps = 18;
-
-    for step in 0..steps {
-        let t0 = step as f32 / steps as f32;
-        let t1 = (step + 1) as f32 / steps as f32;
-        let band = egui::Rect::from_min_max(
-            egui::pos2(rect.left(), egui::lerp(rect.top()..=rect.bottom(), t0)),
-            egui::pos2(rect.right(), egui::lerp(rect.top()..=rect.bottom(), t1)),
-        );
-        painter.rect_filled(
-            band,
-            0,
-            lerp_color(color.app_background_top, color.app_background_bottom, t0),
-        );
-    }
-
-    let cloud_y = rect.top() + rect.height() * 0.36;
-    painter.circle_filled(
-        egui::pos2(rect.right() - rect.width() * 0.22, cloud_y),
-        rect.width() * 0.055,
-        color.cloud,
-    );
-    painter.circle_filled(
-        egui::pos2(rect.left() + rect.width() * 0.40, cloud_y + 18.0),
-        rect.width() * 0.045,
-        color.cloud,
-    );
-}
-
-fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
-    let [ar, ag, ab, aa] = a.to_array();
-    let [br, bg, bb, ba] = b.to_array();
-    egui::Color32::from_rgba_unmultiplied(
-        egui::lerp(ar as f32..=br as f32, t) as u8,
-        egui::lerp(ag as f32..=bg as f32, t) as u8,
-        egui::lerp(ab as f32..=bb as f32, t) as u8,
-        egui::lerp(aa as f32..=ba as f32, t) as u8,
-    )
+    ui.painter()
+        .rect_filled(rect, 0, theme.tokens.semantic.color.app_background);
 }
 
 #[cfg(test)]

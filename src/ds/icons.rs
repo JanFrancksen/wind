@@ -1,6 +1,7 @@
 use eframe::egui;
 
 #[derive(Clone, Copy)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub enum Icon {
     ArrowLeft,
     ArrowRight,

@@ -62,7 +62,10 @@ if "$needs_bundle"; then
   )
 
   printf '%s\n' "$inputs_hash" > "$inputs_file"
-  codesign --force --deep --sign "$codesign_identity" "$bundle"
+  # `bundle_wind` has already signed every nested component. Refresh only the
+  # outer resource seal after writing the inputs marker; asking codesign to
+  # immediately deep-resign CEF can fail inside macOS's signing subsystem.
+  codesign --force --sign "$codesign_identity" "$bundle"
 else
   (
     cd "$repository_root"
@@ -78,9 +81,13 @@ else
     "wind Helper (Renderer)"; do
     cp -f "$target_directory/wind_helper" \
       "$bundle/Contents/Frameworks/$helper.app/Contents/MacOS/$helper"
+    codesign --force --sign "$codesign_identity" \
+      "$bundle/Contents/Frameworks/$helper.app"
   done
 
-  codesign --force --deep --sign "$codesign_identity" "$bundle"
+  # Preserve the already-valid CEF framework signature and reseal the outer
+  # app after its executable and helper apps have been refreshed.
+  codesign --force --sign "$codesign_identity" "$bundle"
 fi
 
 exec "$bundle/Contents/MacOS/wind" "$@"

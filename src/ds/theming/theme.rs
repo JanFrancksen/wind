@@ -1,9 +1,9 @@
 use eframe::egui;
 
 use super::tokens::{
-    ButtonTokens, ColorPrimitives, ComponentTokens, InputTokens, MotionTokens, PrimitiveTokens,
-    RadiusTokens, SemanticColors, SemanticTokens, SizeTokens, SpaceTokens, StrokeTokens, TabTokens,
-    Tokens, TypographyTokens,
+    ButtonTokens, ColorPrimitives, ComponentTokens, InputTokens, MenuTokens, MotionTokens,
+    PrimitiveTokens, RadiusTokens, SemanticColors, SemanticTokens, SizeTokens, SpaceTokens,
+    StrokeTokens, TabTokens, Tokens, TypographyTokens,
 };
 
 #[derive(Clone)]
@@ -103,8 +103,6 @@ impl Theme {
         let semantic = SemanticTokens {
             color: SemanticColors {
                 app_background: color.sky_100,
-                app_background_top: color.sky_200,
-                app_background_bottom: egui::Color32::from_rgb(133, 181, 225),
                 sidebar_background: egui::Color32::from_rgba_unmultiplied(244, 249, 255, 224),
                 sidebar_border: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 154),
                 surface: egui::Color32::from_rgba_unmultiplied(250, 253, 255, 226),
@@ -120,10 +118,6 @@ impl Theme {
                 text_muted: color.neutral_300,
                 border: egui::Color32::from_rgba_unmultiplied(132, 156, 200, 72),
                 shadow: egui::Color32::from_rgba_unmultiplied(52, 101, 166, 36),
-                cloud: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 188),
-                mountain_far: egui::Color32::from_rgb(163, 196, 226),
-                mountain_mid: egui::Color32::from_rgb(116, 165, 213),
-                mountain_near: egui::Color32::from_rgb(68, 124, 183),
                 focus: color.blue_400,
                 accent: color.blue_500,
                 accent_text: color.neutral_0,
@@ -143,6 +137,12 @@ impl Theme {
                 height: size.control_md,
                 padding_x: space.lg,
                 radius: radius.round,
+            },
+            menu: MenuTokens {
+                width: 216.0,
+                item_height: 34.0,
+                icon_size: 15.0,
+                radius: radius.sm,
             },
             tab: TabTokens {
                 height: 36.0,
@@ -183,8 +183,6 @@ impl Theme {
 
         theme.tokens.semantic.color = SemanticColors {
             app_background: color.neutral_900,
-            app_background_top: egui::Color32::from_rgb(18, 43, 86),
-            app_background_bottom: egui::Color32::from_rgb(7, 18, 42),
             sidebar_background: egui::Color32::from_rgba_unmultiplied(18, 32, 63, 232),
             sidebar_border: egui::Color32::from_rgba_unmultiplied(156, 188, 231, 42),
             surface: egui::Color32::from_rgba_unmultiplied(30, 48, 86, 232),
@@ -200,10 +198,6 @@ impl Theme {
             text_muted: color.neutral_200,
             border: egui::Color32::from_rgba_unmultiplied(155, 186, 229, 50),
             shadow: egui::Color32::from_rgba_unmultiplied(0, 7, 23, 88),
-            cloud: egui::Color32::from_rgba_unmultiplied(190, 211, 241, 42),
-            mountain_far: egui::Color32::from_rgb(57, 78, 119),
-            mountain_mid: egui::Color32::from_rgb(41, 70, 122),
-            mountain_near: egui::Color32::from_rgb(24, 49, 98),
             focus: color.blue_300,
             accent: color.blue_400,
             accent_text: color.neutral_0,
@@ -219,9 +213,22 @@ impl Theme {
         ctx.all_styles_mut(|style| {
             style.spacing.item_spacing =
                 egui::vec2(tokens.primitive.space.sm, tokens.primitive.space.sm);
+            style.spacing.menu_margin = egui::Margin::same(tokens.primitive.space.sm as i8);
+            style.spacing.menu_spacing = tokens.primitive.space.xxs;
             style.visuals.dark_mode = self.appearance == ThemeAppearance::Night;
             style.visuals.panel_fill = tokens.semantic.color.app_background;
             style.visuals.window_fill = tokens.semantic.color.surface;
+            style.visuals.window_stroke = egui::Stroke::new(
+                tokens.primitive.stroke.hairline,
+                tokens.semantic.color.border,
+            );
+            style.visuals.menu_corner_radius = tokens.primitive.radius.md.into();
+            style.visuals.popup_shadow = egui::epaint::Shadow {
+                offset: [0, 8],
+                blur: 20,
+                spread: 1,
+                color: tokens.semantic.color.shadow,
+            };
             style.visuals.faint_bg_color = tokens.semantic.color.sidebar_background;
             style.visuals.widgets.inactive.fg_stroke.color = tokens.semantic.color.text;
             style.visuals.widgets.hovered.fg_stroke.color = tokens.semantic.color.text;

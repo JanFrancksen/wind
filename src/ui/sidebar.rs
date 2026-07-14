@@ -6,7 +6,11 @@ use crate::{
         components::{DsButton, Icon, TabButton, divider},
         theming::Theme,
     },
+    native_menu::{self, TabMenuAction},
 };
+
+#[cfg(not(target_os = "macos"))]
+use crate::ds::components::MenuItem;
 
 use super::toolbar;
 
@@ -51,6 +55,9 @@ pub fn show(
     let dragging = egui::DragAndDrop::payload::<DraggedTab>(ui.ctx()).map(|payload| *payload);
     let mut drop_target = None;
     let mut actions = SidebarActions::default();
+    if let Some((tab_id, action)) = native_menu::take_tab_menu_request() {
+        apply_tab_menu_action(tab_id, action, &mut actions);
+    }
 
     ui.add_space(space.lg);
     highlighted_pinned_tabs(ui, browser, theme, dragging, &mut drop_target, &mut actions);
@@ -209,7 +216,7 @@ fn highlighted_pinned_tabs(
             actions.selected = Some(tab.id);
         }
 
-        response.context_menu(|ui| tab_context_menu(ui, tab, actions));
+        attach_tab_context_menu(&response, tab, actions, theme);
     }
 }
 
@@ -304,21 +311,36 @@ fn tab_is_away_from_pin(tab: &Tab) -> bool {
         .is_some_and(|pinned_url| pinned_url != tab.url)
 }
 
-fn tab_context_menu(ui: &mut egui::Ui, tab: &Tab, actions: &mut SidebarActions) {
-    if tab_is_away_from_pin(tab) && ui.button("Return to pinned tab").clicked() {
+#[cfg(not(target_os = "macos"))]
+fn tab_context_menu(ui: &mut egui::Ui, tab: &Tab, actions: &mut SidebarActions, theme: &Theme) {
+    let menu = &theme.tokens.component.menu;
+    ui.set_min_width(menu.width);
+    ui.set_max_width(menu.width);
+
+    if tab_is_away_from_pin(tab)
+        && MenuItem::new("Return to pinned tab", Icon::ArrowLeft)
+            .show(ui, theme)
+            .clicked()
+    {
         actions.returned = Some(tab.id);
         ui.close();
     }
 
     match tab.group() {
         TabGroup::Highlight => {
-            if ui.button("Demote from highlight").clicked() {
+            if MenuItem::new("Demote from highlight", Icon::ChevronDown)
+                .show(ui, theme)
+                .clicked()
+            {
                 actions.demoted = Some(tab.id);
                 ui.close();
             }
         }
         TabGroup::Pinned => {
-            if ui.button("Promote to highlight").clicked() {
+            if MenuItem::new("Promote to highlight", Icon::ChevronUp)
+                .show(ui, theme)
+                .clicked()
+            {
                 actions.promoted = Some(tab.id);
                 ui.close();
             }
@@ -327,26 +349,66 @@ fn tab_context_menu(ui: &mut egui::Ui, tab: &Tab, actions: &mut SidebarActions) 
     }
 
     let pin_label = if tab.pinned { "Unpin tab" } else { "Pin tab" };
-    if ui.button(pin_label).clicked() {
+    if MenuItem::new(pin_label, Icon::Pin)
+        .show(ui, theme)
+        .clicked()
+    {
         actions.toggled_pin = Some(tab.id);
         ui.close();
     }
 
     ui.separator();
-    if ui.button("Move up").clicked() {
+    if MenuItem::new("Move up", Icon::ChevronUp)
+        .show(ui, theme)
+        .clicked()
+    {
         actions.moved_up = Some(tab.id);
         ui.close();
     }
-    if ui.button("Move down").clicked() {
+    if MenuItem::new("Move down", Icon::ChevronDown)
+        .show(ui, theme)
+        .clicked()
+    {
         actions.moved_down = Some(tab.id);
         ui.close();
     }
 
     ui.separator();
-    if ui.button("Close tab").clicked() {
+    if MenuItem::new("Close tab", Icon::X)
+        .danger()
+        .show(ui, theme)
+        .clicked()
+    {
         actions.closed = Some(tab.id);
         ui.close();
     }
+}
+
+fn apply_tab_menu_action(tab_id: TabId, action: TabMenuAction, actions: &mut SidebarActions) {
+    match action {
+        TabMenuAction::ReturnToPinned => actions.returned = Some(tab_id),
+        TabMenuAction::Demote => actions.demoted = Some(tab_id),
+        TabMenuAction::Promote => actions.promoted = Some(tab_id),
+        TabMenuAction::TogglePin => actions.toggled_pin = Some(tab_id),
+        TabMenuAction::MoveUp => actions.moved_up = Some(tab_id),
+        TabMenuAction::MoveDown => actions.moved_down = Some(tab_id),
+        TabMenuAction::Close => actions.closed = Some(tab_id),
+    }
+}
+
+fn attach_tab_context_menu(
+    response: &egui::Response,
+    tab: &Tab,
+    _actions: &mut SidebarActions,
+    _theme: &Theme,
+) {
+    #[cfg(target_os = "macos")]
+    if response.secondary_clicked() {
+        native_menu::show_tab_context_menu(tab);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    response.context_menu(|ui| tab_context_menu(ui, tab, _actions, _theme));
 }
 
 #[derive(Clone)]
@@ -612,7 +674,7 @@ fn paint_tab_row_at(
             actions.selected = Some(tab.id);
         }
 
-        tab_response.context_menu(|ui| tab_context_menu(ui, tab, actions));
+        attach_tab_context_menu(&tab_response, tab, actions, theme);
 
         if is_away_from_pin
             && DsButton::icon(Icon::ArrowLeft)

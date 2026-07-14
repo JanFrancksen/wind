@@ -101,8 +101,6 @@ pub struct SemanticTokens {
 #[derive(Clone)]
 pub struct SemanticColors {
     pub app_background: egui::Color32,
-    pub app_background_top: egui::Color32,
-    pub app_background_bottom: egui::Color32,
     pub sidebar_background: egui::Color32,
     pub sidebar_border: egui::Color32,
     pub surface: egui::Color32,
@@ -118,10 +116,6 @@ pub struct SemanticColors {
     pub text_muted: egui::Color32,
     pub border: egui::Color32,
     pub shadow: egui::Color32,
-    pub cloud: egui::Color32,
-    pub mountain_far: egui::Color32,
-    pub mountain_mid: egui::Color32,
-    pub mountain_near: egui::Color32,
     pub focus: egui::Color32,
     pub accent: egui::Color32,
     pub accent_text: egui::Color32,
@@ -132,6 +126,7 @@ pub struct SemanticColors {
 pub struct ComponentTokens {
     pub button: ButtonTokens,
     pub input: InputTokens,
+    pub menu: MenuTokens,
     pub tab: TabTokens,
 }
 
@@ -148,6 +143,14 @@ pub struct ButtonTokens {
 pub struct InputTokens {
     pub height: f32,
     pub padding_x: f32,
+    pub radius: u8,
+}
+
+#[derive(Clone)]
+pub struct MenuTokens {
+    pub width: f32,
+    pub item_height: f32,
+    pub icon_size: f32,
     pub radius: u8,
 }
 

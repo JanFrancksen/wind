@@ -135,11 +135,14 @@ impl BrowserRenderer {
             self.backend.focus();
         }
 
-        if let RendererStatus::Ready = status {
+        let popup_open = egui::Popup::is_any_open(ui.ctx());
+        if should_show_native_surface(&status, popup_open) {
             self.backend.show();
         } else {
             self.backend.hide();
-            placeholder::paint_status(ui, rect, browser, theme, &status);
+            if !matches!(status, RendererStatus::Ready) {
+                placeholder::paint_status(ui, rect, browser, theme, &status);
+            }
         }
     }
 
@@ -166,6 +169,10 @@ impl BrowserRenderer {
             browser.set_favicon(update.tab_id, update.page_revision, update.favicon);
         }
     }
+}
+
+fn should_show_native_surface(status: &RendererStatus, popup_open: bool) -> bool {
+    matches!(status, RendererStatus::Ready) && !popup_open
 }
 
 impl Default for BrowserRenderer {
@@ -291,3 +298,14 @@ struct FaviconUpdate {
 
 #[cfg(feature = "cef-renderer")]
 pub use cef::{CefRuntime, CefRuntimeError};
+
+#[cfg(test)]
+mod tests {
+    use super::{RendererStatus, should_show_native_surface};
+
+    #[test]
+    fn native_surface_yields_to_egui_popups() {
+        assert!(!should_show_native_surface(&RendererStatus::Ready, true));
+        assert!(should_show_native_surface(&RendererStatus::Ready, false));
+    }
+}
