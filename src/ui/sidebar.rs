@@ -1,12 +1,12 @@
 use eframe::egui;
 
 use crate::{
-    browser::{BrowserState, Tab, TabGroup, TabId},
+    browser::{BrowserState, Tab, TabAction, TabActionKind, TabGroup, TabId},
     ds::{
         components::{DsButton, Icon, TabButton, divider},
         theming::Theme,
     },
-    native_menu::{self, TabMenuAction},
+    native_menu,
 };
 
 #[cfg(not(target_os = "macos"))]
@@ -27,18 +27,6 @@ struct DropTarget {
     index: usize,
 }
 
-#[derive(Default)]
-struct SidebarActions {
-    selected: Option<TabId>,
-    closed: Option<TabId>,
-    toggled_pin: Option<TabId>,
-    promoted: Option<TabId>,
-    moved_up: Option<TabId>,
-    moved_down: Option<TabId>,
-    returned: Option<TabId>,
-    demoted: Option<TabId>,
-}
-
 pub fn show(
     ui: &mut egui::Ui,
     browser: &mut BrowserState,
@@ -54,10 +42,8 @@ pub fn show(
 
     let dragging = egui::DragAndDrop::payload::<DraggedTab>(ui.ctx()).map(|payload| *payload);
     let mut drop_target = None;
-    let mut actions = SidebarActions::default();
-    if let Some((tab_id, action)) = native_menu::take_tab_menu_request() {
-        apply_tab_menu_action(tab_id, action, &mut actions);
-    }
+    let mut actions = Vec::new();
+    actions.extend(native_menu::take_tab_menu_requests());
 
     ui.add_space(space.lg);
     highlighted_pinned_tabs(ui, browser, theme, dragging, &mut drop_target, &mut actions);
@@ -77,19 +63,25 @@ pub fn show(
         *address_input = browser.active_url_for_input();
     }
 
-    apply_sidebar_actions(browser, address_input, actions);
-
     if let Some(dragged) = egui::DragAndDrop::payload::<DraggedTab>(ui.ctx()).map(|item| *item) {
         if ui.input(|input| input.pointer.any_released()) {
             if let Some(target) = drop_target {
                 let _ = egui::DragAndDrop::take_payload::<DraggedTab>(ui.ctx());
-                browser.place_tab(dragged.id, target.group, target.index);
+                actions.push(TabAction::new(
+                    dragged.id,
+                    TabActionKind::Place {
+                        group: target.group,
+                        index: target.index,
+                    },
+                ));
             }
         } else {
             floating_drag_preview(ui, browser, dragged, drop_target, theme);
             ui.ctx().request_repaint();
         }
     }
+
+    apply_tab_actions(browser, address_input, actions);
 
     #[cfg(not(target_os = "macos"))]
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
@@ -120,7 +112,7 @@ fn highlighted_pinned_tabs(
     theme: &Theme,
     dragging: Option<DraggedTab>,
     drop_target: &mut Option<DropTarget>,
-    actions: &mut SidebarActions,
+    actions: &mut Vec<TabAction>,
 ) {
     let tabs = browser
         .tabs()
@@ -209,14 +201,20 @@ fn highlighted_pinned_tabs(
         response.dnd_set_drag_payload(DraggedTab { id: tab.id });
 
         if close_clicked {
-            actions.closed = Some(tab.id);
+            actions.push(TabAction::new(tab.id, TabActionKind::Close));
         } else if return_clicked {
-            actions.returned = Some(tab.id);
+            actions.push(TabAction::new(tab.id, TabActionKind::ReturnToPinned));
         } else if response.clicked() {
-            actions.selected = Some(tab.id);
+            actions.push(TabAction::new(tab.id, TabActionKind::Select));
         }
 
-        attach_tab_context_menu(&response, tab, actions, theme);
+        attach_tab_context_menu(
+            &response,
+            tab,
+            browser.context_actions(tab.id),
+            actions,
+            theme,
+        );
     }
 }
 
@@ -262,7 +260,7 @@ fn highlighted_pin_tile(
             color.text_strong,
         );
     }
-    let return_clicked = if tab_is_away_from_pin(tab) {
+    let return_clicked = if tab.is_away_from_pinned() {
         let icon_size = 14.0;
         let icon_rect = egui::Rect::from_min_size(
             rect.left_top() + egui::vec2(6.0, 6.0),
@@ -282,7 +280,7 @@ fn highlighted_pin_tile(
     } else {
         false
     };
-    let close_clicked = if ui.rect_contains_pointer(rect) {
+    let close_clicked = if tab.is_open() && ui.rect_contains_pointer(rect) {
         let icon_size = 14.0;
         let icon_rect = egui::Rect::from_min_size(
             rect.right_top() + egui::vec2(-icon_size - 6.0, 6.0),
@@ -305,110 +303,77 @@ fn highlighted_pin_tile(
     (response, return_clicked, close_clicked)
 }
 
-fn tab_is_away_from_pin(tab: &Tab) -> bool {
-    tab.pinned_url
-        .as_deref()
-        .is_some_and(|pinned_url| pinned_url != tab.url)
-}
-
 #[cfg(not(target_os = "macos"))]
-fn tab_context_menu(ui: &mut egui::Ui, tab: &Tab, actions: &mut SidebarActions, theme: &Theme) {
+fn tab_context_menu(
+    ui: &mut egui::Ui,
+    tab: &Tab,
+    available: &[TabActionKind],
+    actions: &mut Vec<TabAction>,
+    theme: &Theme,
+) {
     let menu = &theme.tokens.component.menu;
     ui.set_min_width(menu.width);
     ui.set_max_width(menu.width);
 
-    if tab_is_away_from_pin(tab)
-        && MenuItem::new("Return to pinned tab", Icon::ArrowLeft)
-            .show(ui, theme)
-            .clicked()
-    {
-        actions.returned = Some(tab.id);
-        ui.close();
-    }
-
-    match tab.group() {
-        TabGroup::Highlight => {
-            if MenuItem::new("Demote from highlight", Icon::ChevronDown)
-                .show(ui, theme)
-                .clicked()
-            {
-                actions.demoted = Some(tab.id);
-                ui.close();
-            }
+    let mut previous_section = None;
+    for kind in available {
+        let section = tab_action_section(kind);
+        if previous_section.is_some_and(|previous| previous != section) {
+            ui.separator();
         }
-        TabGroup::Pinned => {
-            if MenuItem::new("Promote to highlight", Icon::ChevronUp)
-                .show(ui, theme)
-                .clicked()
-            {
-                actions.promoted = Some(tab.id);
-                ui.close();
-            }
+        let (label, icon) = tab_action_presentation(tab, kind);
+        let item = MenuItem::new(label, icon);
+        let clicked = if matches!(kind, TabActionKind::Close) {
+            item.danger().show(ui, theme).clicked()
+        } else {
+            item.show(ui, theme).clicked()
+        };
+        if clicked {
+            actions.push(TabAction::new(tab.id, kind.clone()));
+            ui.close();
         }
-        TabGroup::Today => {}
-    }
-
-    let pin_label = if tab.pinned { "Unpin tab" } else { "Pin tab" };
-    if MenuItem::new(pin_label, Icon::Pin)
-        .show(ui, theme)
-        .clicked()
-    {
-        actions.toggled_pin = Some(tab.id);
-        ui.close();
-    }
-
-    ui.separator();
-    if MenuItem::new("Move up", Icon::ChevronUp)
-        .show(ui, theme)
-        .clicked()
-    {
-        actions.moved_up = Some(tab.id);
-        ui.close();
-    }
-    if MenuItem::new("Move down", Icon::ChevronDown)
-        .show(ui, theme)
-        .clicked()
-    {
-        actions.moved_down = Some(tab.id);
-        ui.close();
-    }
-
-    ui.separator();
-    if MenuItem::new("Close tab", Icon::X)
-        .danger()
-        .show(ui, theme)
-        .clicked()
-    {
-        actions.closed = Some(tab.id);
-        ui.close();
+        previous_section = Some(section);
     }
 }
 
-fn apply_tab_menu_action(tab_id: TabId, action: TabMenuAction, actions: &mut SidebarActions) {
-    match action {
-        TabMenuAction::ReturnToPinned => actions.returned = Some(tab_id),
-        TabMenuAction::Demote => actions.demoted = Some(tab_id),
-        TabMenuAction::Promote => actions.promoted = Some(tab_id),
-        TabMenuAction::TogglePin => actions.toggled_pin = Some(tab_id),
-        TabMenuAction::MoveUp => actions.moved_up = Some(tab_id),
-        TabMenuAction::MoveDown => actions.moved_down = Some(tab_id),
-        TabMenuAction::Close => actions.closed = Some(tab_id),
+#[cfg(not(target_os = "macos"))]
+fn tab_action_presentation(tab: &Tab, kind: &TabActionKind) -> (&'static str, Icon) {
+    match kind {
+        TabActionKind::ReturnToPinned => ("Return to pinned tab", Icon::ArrowLeft),
+        TabActionKind::Demote => ("Demote from highlight", Icon::ChevronDown),
+        TabActionKind::Promote => ("Promote to highlight", Icon::ChevronUp),
+        TabActionKind::TogglePin if tab.is_organized() => ("Unpin tab", Icon::Pin),
+        TabActionKind::TogglePin => ("Pin tab", Icon::Pin),
+        TabActionKind::MoveUp => ("Move up", Icon::ChevronUp),
+        TabActionKind::MoveDown => ("Move down", Icon::ChevronDown),
+        TabActionKind::Close => ("Close tab", Icon::X),
+        _ => ("Tab action", Icon::ArrowRight),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn tab_action_section(kind: &TabActionKind) -> u8 {
+    match kind {
+        TabActionKind::MoveUp | TabActionKind::MoveDown => 1,
+        TabActionKind::Close => 2,
+        _ => 0,
     }
 }
 
 fn attach_tab_context_menu(
     response: &egui::Response,
     tab: &Tab,
-    _actions: &mut SidebarActions,
+    available: Vec<TabActionKind>,
+    _actions: &mut Vec<TabAction>,
     _theme: &Theme,
 ) {
     #[cfg(target_os = "macos")]
     if response.secondary_clicked() {
-        native_menu::show_tab_context_menu(tab);
+        native_menu::show_tab_context_menu(tab, available);
     }
 
     #[cfg(not(target_os = "macos"))]
-    response.context_menu(|ui| tab_context_menu(ui, tab, _actions, _theme));
+    response.context_menu(|ui| tab_context_menu(ui, tab, &available, _actions, _theme));
 }
 
 #[derive(Clone)]
@@ -516,9 +481,12 @@ fn tab_sections(
     theme: &Theme,
     dragging: Option<DraggedTab>,
     drop_target: &mut Option<DropTarget>,
-    actions: &mut SidebarActions,
+    actions: &mut Vec<TabAction>,
 ) {
-    let has_pinned_tabs = browser.tabs().iter().any(|tab| tab.pinned);
+    let has_pinned_tabs = browser
+        .tabs()
+        .iter()
+        .any(|tab| tab.group() != TabGroup::Today);
 
     tab_row_group(
         ui,
@@ -555,7 +523,7 @@ fn tab_row_group(
     theme: &Theme,
     dragging: Option<DraggedTab>,
     drop_target: &mut Option<DropTarget>,
-    actions: &mut SidebarActions,
+    actions: &mut Vec<TabAction>,
 ) {
     let mut tabs = browser
         .tabs()
@@ -628,6 +596,7 @@ fn tab_row_group(
             rect,
             tab,
             browser.active_tab().id == tab.id,
+            browser.context_actions(tab.id),
             theme,
             actions,
         );
@@ -639,8 +608,9 @@ fn paint_tab_row_at(
     row_rect: egui::Rect,
     tab: &Tab,
     is_active: bool,
+    available_actions: Vec<TabActionKind>,
     theme: &Theme,
-    actions: &mut SidebarActions,
+    actions: &mut Vec<TabAction>,
 ) {
     ui.push_id(("tab-row", tab.id), |ui| {
         let favicon = favicon_texture(ui, tab);
@@ -651,7 +621,7 @@ fn paint_tab_row_at(
             .close_size
             .max(theme.tokens.component.button.height_sm);
         let spacing = theme.tokens.primitive.space.xs;
-        let is_away_from_pin = tab_is_away_from_pin(tab);
+        let is_away_from_pin = tab.is_away_from_pinned();
         let actions_width = if is_away_from_pin {
             action_size + spacing
         } else {
@@ -670,15 +640,15 @@ fn paint_tab_row_at(
         let tab_response = TabButton::new(&tab.title)
             .favicon(favicon.as_ref())
             .selected(is_active)
-            .close_visible(row_hovered)
+            .close_visible(tab.is_open() && row_hovered)
             .width(tab_width)
             .show(&mut row_ui, theme);
         tab_response.dnd_set_drag_payload(DraggedTab { id: tab.id });
         if tab_response.clicked() {
-            actions.selected = Some(tab.id);
+            actions.push(TabAction::new(tab.id, TabActionKind::Select));
         }
 
-        attach_tab_context_menu(&tab_response, tab, actions, theme);
+        attach_tab_context_menu(&tab_response, tab, available_actions, actions, theme);
 
         if is_away_from_pin
             && DsButton::icon(Icon::ArrowLeft)
@@ -689,9 +659,9 @@ fn paint_tab_row_at(
                 .on_hover_text("Return to pinned tab")
                 .clicked()
         {
-            actions.returned = Some(tab.id);
+            actions.push(TabAction::new(tab.id, TabActionKind::ReturnToPinned));
         }
-        if row_hovered {
+        if tab.is_open() && row_hovered {
             let close_rect = egui::Rect::from_center_size(
                 egui::pos2(
                     tab_response.rect.right() - spacing - action_size * 0.5,
@@ -712,73 +682,22 @@ fn paint_tab_row_at(
                 .on_hover_text("Close tab")
                 .clicked()
             {
-                actions.closed = Some(tab.id);
+                actions.push(TabAction::new(tab.id, TabActionKind::Close));
             }
         }
     });
 }
 
-fn apply_sidebar_actions(
+fn apply_tab_actions(
     browser: &mut BrowserState,
     address_input: &mut String,
-    actions: SidebarActions,
+    actions: Vec<TabAction>,
 ) {
-    let mut changed_selection = false;
-    let select = |browser: &mut BrowserState, tab_id: TabId| {
-        let Some(index) = browser.tabs().iter().position(|tab| tab.id == tab_id) else {
-            return false;
-        };
-        browser.select_tab(index);
-        true
-    };
-
-    if let Some(tab_id) = actions.toggled_pin
-        && select(browser, tab_id)
-    {
-        browser.toggle_pin_active_tab();
-        changed_selection = true;
+    let mut active_page_changed = false;
+    for action in actions {
+        active_page_changed |= browser.apply_tab_action(action).active_page_changed();
     }
-    if let Some(tab_id) = actions.returned
-        && select(browser, tab_id)
-    {
-        browser.return_active_to_pinned_url();
-        changed_selection = true;
-    }
-    if let Some(tab_id) = actions.promoted
-        && select(browser, tab_id)
-    {
-        browser.promote_active_pinned_tab();
-        changed_selection = true;
-    }
-    if let Some(tab_id) = actions.demoted
-        && select(browser, tab_id)
-    {
-        browser.demote_active_highlighted_tab();
-        changed_selection = true;
-    }
-    if let Some(tab_id) = actions.moved_up
-        && select(browser, tab_id)
-    {
-        browser.move_active_tab_up();
-        changed_selection = true;
-    }
-    if let Some(tab_id) = actions.moved_down
-        && select(browser, tab_id)
-    {
-        browser.move_active_tab_down();
-        changed_selection = true;
-    }
-    if let Some(tab_id) = actions.selected {
-        changed_selection |= select(browser, tab_id);
-    }
-    if let Some(tab_id) = actions.closed
-        && let Some(index) = browser.tabs().iter().position(|tab| tab.id == tab_id)
-    {
-        browser.close_tab(index);
-        changed_selection = true;
-    }
-
-    if changed_selection {
+    if active_page_changed {
         *address_input = browser.active_url_for_input();
     }
 }

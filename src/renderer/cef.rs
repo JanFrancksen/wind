@@ -457,6 +457,7 @@ impl CefEventBridge {
 struct LoadedPage {
     url: String,
     revision: u64,
+    session_revision: u64,
     bounds: PhysicalRect,
 }
 
@@ -484,6 +485,13 @@ impl CefRenderer {
             return RendererStatus::UnsupportedUrl(target.page.url.clone());
         }
 
+        if self
+            .tabs
+            .get(&target.page.tab_id)
+            .is_some_and(|tab| tab.loaded.session_revision != target.page.session_revision)
+        {
+            self.close_renderer_tab(target.page.tab_id);
+        }
         self.set_active_tab(target.page.tab_id);
 
         if !self.tabs.contains_key(&target.page.tab_id) {
@@ -580,17 +588,7 @@ impl CefRenderer {
             .collect::<Vec<_>>();
 
         for tab_id in closing_tab_ids {
-            let Some(tab) = self.tabs.remove(&tab_id) else {
-                continue;
-            };
-            let browser = request_browser_close(&tab.browser);
-            if let Some(host) = browser.and_then(|browser| browser.host()) {
-                host.close_browser(1);
-            }
-            // CEF closes browsers asynchronously and may continue invoking the
-            // client until `on_before_close`. Retain the callback owner until
-            // that lifecycle notification has run.
-            self.closing_tabs.push(tab);
+            self.close_renderer_tab(tab_id);
         }
 
         if self
@@ -599,6 +597,20 @@ impl CefRenderer {
         {
             self.active_tab = None;
         }
+    }
+
+    fn close_renderer_tab(&mut self, tab_id: TabId) {
+        let Some(tab) = self.tabs.remove(&tab_id) else {
+            return;
+        };
+        let browser = request_browser_close(&tab.browser);
+        if let Some(host) = browser.and_then(|browser| browser.host()) {
+            host.close_browser(1);
+        }
+        // CEF closes browsers asynchronously and may continue invoking the
+        // client until `on_before_close`. Retain the callback owner until
+        // that lifecycle notification has run.
+        self.closing_tabs.push(tab);
     }
 
     fn create_browser(&mut self, parent: cef_window_handle_t, target: &PageTarget) -> bool {
@@ -632,6 +644,7 @@ impl CefRenderer {
                     loaded: LoadedPage {
                         url: target.page.url.clone(),
                         revision: target.page.render_revision,
+                        session_revision: target.page.session_revision,
                         bounds: target.bounds,
                     },
                 },
@@ -667,6 +680,7 @@ impl CefRenderer {
         tab.loaded = LoadedPage {
             url: target.page.url.clone(),
             revision: target.page.render_revision,
+            session_revision: target.page.session_revision,
             bounds: target.bounds,
         };
     }
@@ -1239,6 +1253,7 @@ mod tests {
                 loaded: LoadedPage {
                     url: "https://example.com".to_string(),
                     revision: 0,
+                    session_revision: 0,
                     bounds: PhysicalRect {
                         x: 0,
                         y: 0,

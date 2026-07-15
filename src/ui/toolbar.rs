@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use crate::{
-    browser::BrowserState,
+    browser::{BrowserState, TabAction, TabActionKind},
     ds::{
         components::{DsButton, Icon, SearchField},
         theming::Theme,
@@ -29,8 +29,8 @@ pub fn show_compact(
             .clicked()
             && browser.can_go_back()
         {
-            browser.go_back();
-            *address_input = browser.active_url_for_input();
+            let outcome = apply_to_active(browser, TabActionKind::Back);
+            sync_address_after(outcome, browser, address_input);
         }
 
         if DsButton::icon(Icon::ArrowRight)
@@ -41,8 +41,8 @@ pub fn show_compact(
             .clicked()
             && browser.can_go_forward()
         {
-            browser.go_forward();
-            *address_input = browser.active_url_for_input();
+            let outcome = apply_to_active(browser, TabActionKind::Forward);
+            sync_address_after(outcome, browser, address_input);
         }
 
         if DsButton::icon(Icon::Reload)
@@ -52,7 +52,8 @@ pub fn show_compact(
             .show(ui, theme)
             .clicked()
         {
-            browser.reload();
+            let outcome = apply_to_active(browser, TabActionKind::Reload);
+            sync_address_after(outcome, browser, address_input);
         }
 
         if DsButton::icon(Icon::ArrowLeft)
@@ -75,8 +76,10 @@ pub fn show_compact(
 
     let pressed_enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
     if pressed_enter {
-        browser.submit_address_input(address_input);
-        *address_input = browser.active_url_for_input();
+        let outcome = browser.submit_address_input(address_input);
+        if outcome.active_page_changed() {
+            *address_input = browser.active_url_for_input();
+        }
     }
 }
 
@@ -95,22 +98,43 @@ fn handle_shortcuts(ui: &mut egui::Ui, browser: &mut BrowserState, address_input
         )
     });
 
-    if reopen_closed {
-        browser.reopen_closed_tab();
+    let outcome = if reopen_closed {
+        let changed = browser.reopen_closed_tab().is_some();
+        if changed {
+            *address_input = browser.active_url_for_input();
+        }
+        return;
     } else if new_tab {
         super::open_new_tab(browser, address_input);
         return;
     } else if close_tab {
-        browser.close_active_tab();
+        apply_to_active(browser, TabActionKind::Close)
     } else if reload {
-        browser.reload();
+        apply_to_active(browser, TabActionKind::Reload)
     } else if back {
-        browser.go_back();
+        apply_to_active(browser, TabActionKind::Back)
     } else if forward {
-        browser.go_forward();
+        apply_to_active(browser, TabActionKind::Forward)
     } else {
         return;
-    }
+    };
+    sync_address_after(outcome, browser, address_input);
+}
 
-    *address_input = browser.active_url_for_input();
+fn apply_to_active(
+    browser: &mut BrowserState,
+    kind: TabActionKind,
+) -> crate::browser::TabActionOutcome {
+    let tab_id = browser.active_tab().id;
+    browser.apply_tab_action(TabAction::new(tab_id, kind))
+}
+
+fn sync_address_after(
+    outcome: crate::browser::TabActionOutcome,
+    browser: &BrowserState,
+    address_input: &mut String,
+) {
+    if outcome.active_page_changed() {
+        *address_input = browser.active_url_for_input();
+    }
 }

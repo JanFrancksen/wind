@@ -17,7 +17,7 @@ pub struct NewTabScene {
     last_rendered_at: Option<Instant>,
     search_input: String,
     texture: Option<egui::TextureHandle>,
-    focused_tab_ids: HashSet<TabId>,
+    focused_sessions: HashSet<(TabId, u64)>,
 }
 
 impl NewTabScene {
@@ -27,7 +27,7 @@ impl NewTabScene {
             last_rendered_at: None,
             search_input: String::new(),
             texture: None,
-            focused_tab_ids: HashSet::new(),
+            focused_sessions: HashSet::new(),
         }
     }
 
@@ -77,11 +77,16 @@ impl NewTabScene {
 
         // A new tab becomes active as soon as it is created. Request focus once for each tab
         // rather than on every frame, so users can still move focus elsewhere on the page.
-        let autofocus = self.focused_tab_ids.insert(browser.active_tab().id);
+        let active_tab = browser.active_tab();
+        let autofocus = self
+            .focused_sessions
+            .insert((active_tab.id, active_tab.session_revision));
         let submitted = paint_search(ui, rect, &mut self.search_input, theme, autofocus);
         if submitted && !self.search_input.trim().is_empty() {
-            browser.submit_address_input(&self.search_input);
-            *address_input = browser.active_url_for_input();
+            let outcome = browser.submit_address_input(&self.search_input);
+            if outcome.active_page_changed() {
+                *address_input = browser.active_url_for_input();
+            }
             self.search_input.clear();
         }
 
