@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     cell::RefCell,
     collections::{HashMap, HashSet},
     error::Error,
@@ -248,6 +249,7 @@ pub struct CefRenderer {
     surface_visible: bool,
     request_context_root: PathBuf,
     request_contexts: HashMap<SpaceId, RequestContext>,
+    pending_cookie_flushes: Rc<Cell<usize>>,
 }
 
 type SharedEventBridge = Rc<CefEventBridge>;
@@ -472,6 +474,7 @@ impl CefRenderer {
             surface_visible: true,
             request_context_root,
             request_contexts: HashMap::new(),
+            pending_cookie_flushes: Rc::new(Cell::new(0)),
         }
     }
 
@@ -540,6 +543,28 @@ impl CefRenderer {
         self.active_tab = None;
     }
 
+    pub fn flush_session_data(&mut self) {
+        if self.pending_cookie_flushes.get() != 0 {
+            return;
+        }
+
+        for context in self.request_contexts.values() {
+            let Some(manager) = context.cookie_manager(None) else {
+                continue;
+            };
+            self.pending_cookie_flushes
+                .set(self.pending_cookie_flushes.get() + 1);
+            let mut callback = WindCookieFlushCallback::new(self.pending_cookie_flushes.clone());
+            if manager.flush_store(Some(&mut callback)) != 1 {
+                finish_cookie_flush(&self.pending_cookie_flushes);
+            }
+        }
+    }
+
+    pub fn session_data_flush_complete(&self) -> bool {
+        self.pending_cookie_flushes.get() == 0
+    }
+
     pub fn shutdown_complete(&mut self) -> bool {
         self.closing_tabs.retain(|tab| !tab.browser.borrow().closed);
         if self.tabs.is_empty() && self.closing_tabs.is_empty() {
@@ -551,7 +576,6 @@ impl CefRenderer {
     }
 
     pub fn tick(&mut self) {
-        #[cfg(not(target_os = "macos"))]
         do_message_loop_work();
     }
 
@@ -773,6 +797,22 @@ fn persistent_request_context_settings(path: PathBuf) -> RequestContextSettings 
 
 fn request_context_cache_path(root: &std::path::Path, space_id: SpaceId) -> PathBuf {
     root.join(space_id.cache_key())
+}
+
+fn finish_cookie_flush(pending: &Cell<usize>) {
+    pending.set(pending.get().saturating_sub(1));
+}
+
+wrap_completion_callback! {
+    struct WindCookieFlushCallback {
+        pending: Rc<Cell<usize>>,
+    }
+
+    impl CompletionCallback {
+        fn on_complete(&self) {
+            finish_cookie_flush(&self.pending);
+        }
+    }
 }
 
 fn request_browser_close(slot: &SharedBrowser) -> Option<Browser> {
@@ -1302,6 +1342,26 @@ mod tests {
         assert!(private.starts_with(&root));
         assert!(work.starts_with(&root));
         assert_ne!(private, work);
+    }
+
+    #[test]
+    fn restoring_open_tabs_does_not_eagerly_create_native_browsers() {
+        let browser = BrowserState::with_default_spaces("example.com");
+        let mut renderer = CefRenderer::new(std::env::temp_dir().join("wind-cef-lazy-contexts"));
+
+        renderer.sync_tabs(browser.open_tabs());
+
+        assert!(renderer.tabs.is_empty());
+        assert!(renderer.request_contexts.is_empty());
+    }
+
+    #[test]
+    fn flushing_without_live_request_contexts_completes_immediately() {
+        let mut renderer = CefRenderer::new(std::env::temp_dir().join("wind-cef-flush-contexts"));
+
+        renderer.flush_session_data();
+
+        assert!(renderer.session_data_flush_complete());
     }
 
     #[test]

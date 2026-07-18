@@ -1,4 +1,5 @@
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 
 use super::tokens::{
     ButtonTokens, ColorPrimitives, ComponentTokens, InputTokens, MenuTokens, MotionTokens,
@@ -12,8 +13,9 @@ pub struct Theme {
     pub appearance: ThemeAppearance,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeAppearance {
+    #[default]
     Alpine,
     Night,
 }

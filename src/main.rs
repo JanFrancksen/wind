@@ -9,7 +9,7 @@ mod ui;
 
 use browser::BrowserState;
 use ds::theming::Theme;
-use persistence::{AppPaths, BrowserStore};
+use persistence::{AppPaths, BrowserStore, ChromeState, PersistedAppState};
 use renderer::BrowserRenderer;
 use std::time::{Duration, Instant};
 
@@ -23,6 +23,7 @@ struct BrowserApp {
     sidebar_width: f32,
     sidebar_collapsed: bool,
     store: BrowserStore,
+    chrome_dirty: bool,
     save_pending_since: Option<Instant>,
     last_cleanup_attempt: Option<Instant>,
     #[cfg(feature = "cef-renderer")]
@@ -32,15 +33,16 @@ struct BrowserApp {
 impl BrowserApp {
     fn new(
         cef_available: bool,
-        mut browser: BrowserState,
+        mut state: PersistedAppState,
         store: BrowserStore,
         #[cfg(feature = "cef-renderer")] cef_runtime: Option<renderer::CefRuntime>,
     ) -> Self {
-        browser.mark_clean();
+        state.browser.mark_clean();
+        let browser = state.browser;
         let address_input = browser.active_url_for_input();
 
-        let theme = Theme::wind(ds::theming::ThemeAppearance::Alpine);
-        let sidebar_width = theme.tokens.primitive.size.sidebar_width;
+        let theme = Theme::wind(state.chrome.theme);
+        let sidebar_width = state.chrome.sidebar_width;
 
         Self {
             browser,
@@ -48,8 +50,9 @@ impl BrowserApp {
             address_input,
             theme,
             sidebar_width,
-            sidebar_collapsed: false,
+            sidebar_collapsed: state.chrome.sidebar_collapsed,
             store,
+            chrome_dirty: false,
             save_pending_since: None,
             last_cleanup_attempt: None,
             #[cfg(feature = "cef-renderer")]
@@ -57,11 +60,28 @@ impl BrowserApp {
         }
     }
 
+    fn persisted_state(&self) -> PersistedAppState {
+        PersistedAppState {
+            browser: self.browser.clone(),
+            chrome: ChromeState {
+                theme: self.theme.appearance,
+                sidebar_width: self.sidebar_width,
+                sidebar_collapsed: self.sidebar_collapsed,
+            },
+        }
+    }
+
+    fn save_state(&self) -> std::io::Result<()> {
+        self.store.save(&self.persisted_state())
+    }
+
     fn save_if_due(&mut self, context: &egui::Context) {
         let urgent = self.browser.take_urgent_save();
-        let dirty = self.browser.take_dirty();
+        let browser_dirty = self.browser.take_dirty();
+        let chrome_dirty = std::mem::take(&mut self.chrome_dirty);
+        let dirty = browser_dirty || chrome_dirty;
         if urgent {
-            match self.store.save(&self.browser) {
+            match self.save_state() {
                 Ok(()) => self.save_pending_since = None,
                 Err(error) => {
                     eprintln!("Failed to save browser state: {error}");
@@ -77,7 +97,7 @@ impl BrowserApp {
             .save_pending_since
             .is_some_and(|started| started.elapsed() >= SAVE_DEBOUNCE)
         {
-            match self.store.save(&self.browser) {
+            match self.save_state() {
                 Ok(()) => self.save_pending_since = None,
                 Err(error) => eprintln!("Failed to save browser state: {error}"),
             }
@@ -112,6 +132,11 @@ impl eframe::App for BrowserApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let chrome_before = (
+            self.theme.appearance,
+            self.sidebar_width,
+            self.sidebar_collapsed,
+        );
         if let Some(appearance) = native_menu::take_theme_request() {
             self.theme = Theme::wind(appearance);
         }
@@ -126,6 +151,12 @@ impl eframe::App for BrowserApp {
             &mut self.sidebar_width,
             &mut self.sidebar_collapsed,
         );
+        let chrome_after = (
+            self.theme.appearance,
+            self.sidebar_width,
+            self.sidebar_collapsed,
+        );
+        self.chrome_dirty |= chrome_before != chrome_after;
         self.save_if_due(ui.ctx());
     }
 
@@ -133,7 +164,7 @@ impl eframe::App for BrowserApp {
         let renderer_closed = self.renderer.shutdown_and_drain(Duration::from_secs(5));
         #[cfg(not(feature = "cef-renderer"))]
         let _ = renderer_closed;
-        if let Err(error) = self.store.save(&self.browser) {
+        if let Err(error) = self.save_state() {
             eprintln!("Failed to save browser state during shutdown: {error}");
         }
         #[cfg(feature = "cef-renderer")]
@@ -173,17 +204,17 @@ fn main() -> eframe::Result<()> {
     // CEF child processes return above before touching browser state. Only the
     // browser process may load, migrate, clean, or save the shared snapshot.
     let store = BrowserStore::new(paths.clone());
-    let mut browser = store.load().unwrap_or_else(|error| {
+    let mut state = store.load().unwrap_or_else(|error| {
         eprintln!("Failed to load browser state: {error}");
-        BrowserState::with_default_spaces("https://www.google.com")
+        PersistedAppState::with_default_browser()
     });
-    for space_id in browser.pending_session_deletions().to_vec() {
+    for space_id in state.browser.pending_session_deletions().to_vec() {
         if store.delete_session_data(space_id).is_ok() {
-            browser.mark_session_deleted(space_id);
+            state.browser.mark_session_deleted(space_id);
         }
     }
-    if browser.take_dirty() {
-        let _ = store.save(&browser);
+    if state.browser.take_dirty() {
+        let _ = store.save(&state);
     }
 
     let app_icon = runtime_app_icon();
@@ -196,6 +227,7 @@ fn main() -> eframe::Result<()> {
             .with_titlebar_shown(false)
             .with_titlebar_buttons_shown(false)
             .with_icon(app_icon),
+        persistence_path: Some(paths.window_state_file()),
         ..Default::default()
     };
 
@@ -206,7 +238,7 @@ fn main() -> eframe::Result<()> {
             egui_extras::install_image_loaders(&cc.egui_ctx);
             let app = BrowserApp::new(
                 cef_available,
-                browser,
+                state,
                 store,
                 #[cfg(feature = "cef-renderer")]
                 cef_runtime,

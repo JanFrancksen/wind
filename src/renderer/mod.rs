@@ -152,11 +152,18 @@ impl BrowserRenderer {
     }
 
     pub fn shutdown_and_drain(&mut self, timeout: Duration) -> bool {
-        self.backend.shutdown();
         let deadline = Instant::now() + timeout;
+        self.backend.flush_session_data();
+        while !self.backend.session_data_flush_complete() && Instant::now() < deadline {
+            self.backend.tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let session_data_flushed = self.backend.session_data_flush_complete();
+
+        self.backend.shutdown();
         loop {
             if self.backend.shutdown_complete() {
-                return true;
+                return session_data_flushed;
             }
             if Instant::now() >= deadline {
                 return false;
@@ -300,6 +307,21 @@ impl RendererBackend {
             Self::Placeholder(renderer) => renderer.shutdown(),
             #[cfg(feature = "cef-renderer")]
             Self::Cef(renderer) => renderer.shutdown(),
+        }
+    }
+
+    fn flush_session_data(&mut self) {
+        #[cfg(feature = "cef-renderer")]
+        if let Self::Cef(renderer) = self {
+            renderer.flush_session_data();
+        }
+    }
+
+    fn session_data_flush_complete(&self) -> bool {
+        match self {
+            Self::Placeholder(_) => true,
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.session_data_flush_complete(),
         }
     }
 
