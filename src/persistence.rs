@@ -240,6 +240,8 @@ mod tests {
         ));
         browser.apply_tab_action(TabAction::new(private_tab, TabActionKind::TogglePin));
         browser.apply_tab_action(TabAction::new(private_tab, TabActionKind::Promote));
+        let pinned_tab = browser.add_tab("pinned.example");
+        browser.apply_tab_action(TabAction::new(pinned_tab, TabActionKind::TogglePin));
         let closed_tab = browser.add_tab("closed.example");
         browser.apply_tab_action(TabAction::new(closed_tab, TabActionKind::Close));
         let work = browser.create_space("Work", SpaceColor::Blue);
@@ -260,29 +262,32 @@ mod tests {
         assert_eq!(restored.browser.spaces().len(), 2);
         assert_eq!(restored.browser.active_space().id(), work);
         assert_eq!(restored.browser.active_tab().url, "https://work.example");
+        let highlight = restored
+            .browser
+            .space(private)
+            .unwrap()
+            .tabs()
+            .iter()
+            .find(|tab| tab.url == "https://private-history.example")
+            .unwrap();
         assert_eq!(
-            restored.browser.space(private).unwrap().active_tab().url,
-            "https://private-history.example"
-        );
-        assert_eq!(
-            restored
-                .browser
-                .space(private)
-                .unwrap()
-                .active_tab()
-                .history,
+            highlight.history,
             vec!["https://private.example", "https://private-history.example"]
         );
+        assert_eq!(highlight.group(), TabGroup::Highlight);
+        assert_eq!(restored.browser.active_tab().group(), TabGroup::Today);
         assert_eq!(
             restored
                 .browser
                 .space(private)
                 .unwrap()
-                .active_tab()
+                .tabs()
+                .iter()
+                .find(|tab| tab.url == "https://pinned.example")
+                .unwrap()
                 .group(),
-            TabGroup::Highlight
+            TabGroup::Pinned
         );
-        assert_eq!(restored.browser.active_tab().group(), TabGroup::Today);
         assert_eq!(restored.chrome.theme, ThemeAppearance::Night);
         assert_eq!(restored.chrome.sidebar_width, 336.0);
         assert!(restored.chrome.sidebar_collapsed);
