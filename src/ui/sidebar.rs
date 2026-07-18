@@ -146,10 +146,26 @@ fn tabs_panel(
     }
 
     ui.add_space(space.lg);
-    highlighted_pinned_tabs(ui, browser, theme, dragging, &mut drop_target, &mut actions);
+    highlighted_pinned_tabs(
+        ui,
+        browser,
+        theme,
+        dragging,
+        &mut drop_target,
+        &mut actions,
+        interactive,
+    );
 
     divider(ui, theme);
-    tab_sections(ui, browser, theme, dragging, &mut drop_target, &mut actions);
+    tab_sections(
+        ui,
+        browser,
+        theme,
+        dragging,
+        &mut drop_target,
+        &mut actions,
+        interactive,
+    );
 
     ui.add_space(space.sm);
     if DsButton::new("New Tab")
@@ -425,6 +441,7 @@ fn highlighted_pinned_tabs(
     dragging: Option<DraggedTab>,
     drop_target: &mut Option<DropTarget>,
     actions: &mut Vec<TabAction>,
+    animate_reorder: bool,
 ) {
     let tabs = browser
         .tabs()
@@ -501,7 +518,11 @@ fn highlighted_pinned_tabs(
             continue;
         };
 
-        let rect = animated_tab_rect(ui, tab.id, target_rect, theme);
+        let rect = if animate_reorder {
+            animated_tab_rect(ui, tab.id, target_rect, theme)
+        } else {
+            target_rect
+        };
         let mut tile_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(rect)
@@ -796,6 +817,7 @@ fn tab_sections(
     dragging: Option<DraggedTab>,
     drop_target: &mut Option<DropTarget>,
     actions: &mut Vec<TabAction>,
+    animate_reorder: bool,
 ) {
     let has_pinned_tabs = browser
         .tabs()
@@ -811,6 +833,7 @@ fn tab_sections(
         dragging,
         drop_target,
         actions,
+        animate_reorder,
     );
     tab_row_group(
         ui,
@@ -825,6 +848,7 @@ fn tab_sections(
         dragging,
         drop_target,
         actions,
+        animate_reorder,
     );
 }
 
@@ -838,6 +862,7 @@ fn tab_row_group(
     dragging: Option<DraggedTab>,
     drop_target: &mut Option<DropTarget>,
     actions: &mut Vec<TabAction>,
+    animate_reorder: bool,
 ) {
     let mut tabs = browser
         .tabs()
@@ -904,7 +929,11 @@ fn tab_row_group(
             paint_drop_placeholder(ui, target_rect, label, theme);
             continue;
         };
-        let rect = animated_tab_rect(ui, tab.id, target_rect, theme);
+        let rect = if animate_reorder {
+            animated_tab_rect(ui, tab.id, target_rect, theme)
+        } else {
+            target_rect
+        };
         paint_tab_row_at(
             ui,
             rect,
