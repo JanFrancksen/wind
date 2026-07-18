@@ -64,6 +64,7 @@ pub fn show(
         show_space_tabs(ui, pane_rect, browser, address_input, theme);
     });
     confirm_space_deletion(ui, browser, address_input, theme);
+    rename_space_dialog(ui, browser, theme);
 
     toggle_theme
 }
@@ -264,6 +265,7 @@ fn space_switcher(
     address_input: &mut String,
     theme: &Theme,
 ) {
+    apply_native_space_menu_requests(ui, browser);
     let active = browser.active_space().id();
     let spaces = browser
         .spaces()
@@ -271,55 +273,288 @@ fn space_switcher(
         .map(|space| (space.id(), space.name().to_owned(), space.color()))
         .collect::<Vec<_>>();
 
-    ui.separator();
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = theme.tokens.primitive.space.xs;
-        for (space_id, name, color) in spaces {
-            let selected = space_id == active;
-            let label = name
-                .chars()
-                .next()
-                .unwrap_or('S')
-                .to_uppercase()
-                .to_string();
-            let response = ui
-                .add(
-                    egui::Button::new(
-                        egui::RichText::new(label)
-                            .strong()
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(space_color(color))
-                    .selected(selected)
-                    .min_size(egui::vec2(30.0, 30.0))
-                    .corner_radius(15.0),
-                )
-                .on_hover_text(format!("{name} · Control+number"));
-            if response.clicked() && browser.switch_space(space_id) {
-                *address_input = browser.active_url_for_input();
-            }
-            response.context_menu(|ui| {
-                space_context_menu(ui, browser, space_id, &name, theme);
-            });
-        }
+    let tokens = &theme.tokens;
+    let space = &tokens.primitive.space;
+    ui.add_space(space.sm);
+    egui::Frame::new()
+        .fill(tokens.semantic.color.chrome)
+        .stroke(egui::Stroke::new(
+            tokens.primitive.stroke.hairline,
+            tokens.semantic.color.border,
+        ))
+        .corner_radius(tokens.primitive.radius.round)
+        .inner_margin(egui::Margin::same(space.xxs as i8))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                for (index, (space_id, name, color)) in spaces.into_iter().enumerate() {
+                    let response = space_bubble(ui, space_id, color, space_id == active, theme)
+                        .on_hover_text(format!("{name} · Control+{}", index + 1));
+                    if response.clicked() && browser.switch_space(space_id) {
+                        *address_input = browser.active_url_for_input();
+                    }
+                    attach_space_context_menu(&response, browser, space_id, &name, color, theme);
+                }
 
-        if DsButton::new("+")
-            .ghost()
-            .small()
-            .width(30.0)
-            .show(ui, theme)
-            .on_hover_text("Create space")
-            .clicked()
-        {
-            let ordinal = browser.spaces().len() + 1;
-            let color = SpaceColor::ALL[(ordinal - 1) % SpaceColor::ALL.len()];
-            let id = browser.create_space(format!("Space {ordinal}"), color);
-            browser.switch_space(id);
-            *address_input = browser.active_url_for_input();
-        }
-    });
+                if add_space_bubble(ui, theme)
+                    .on_hover_text("Create a new space")
+                    .clicked()
+                {
+                    let ordinal = browser.spaces().len() + 1;
+                    let color = SpaceColor::ALL[(ordinal - 1) % SpaceColor::ALL.len()];
+                    let id = browser.create_space(format!("Space {ordinal}"), color);
+                    browser.switch_space(id);
+                    *address_input = browser.active_url_for_input();
+                }
+            });
+        });
 }
 
+fn apply_native_space_menu_requests(ui: &egui::Ui, browser: &mut BrowserState) {
+    for action in native_menu::take_space_menu_requests() {
+        match action.kind {
+            native_menu::SpaceMenuActionKind::Rename => {
+                let name = browser
+                    .space(action.space_id)
+                    .map(|space| space.name().to_owned())
+                    .unwrap_or_default();
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(egui::Id::new("space-rename-dialog"), action.space_id);
+                    data.insert_temp(egui::Id::new(("space-rename-value", action.space_id)), name);
+                });
+            }
+            native_menu::SpaceMenuActionKind::Recolor(color) => {
+                browser.recolor_space(action.space_id, color);
+            }
+            native_menu::SpaceMenuActionKind::Delete => {
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(egui::Id::new("space-delete-confirm"), action.space_id);
+                });
+            }
+        }
+    }
+}
+
+fn attach_space_context_menu(
+    response: &egui::Response,
+    browser: &mut BrowserState,
+    space_id: SpaceId,
+    _name: &str,
+    _color: SpaceColor,
+    _theme: &Theme,
+) {
+    #[cfg(target_os = "macos")]
+    if response.secondary_clicked() {
+        native_menu::show_space_context_menu(space_id, _color, browser.spaces().len() > 1);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    response.context_menu(|ui| space_context_menu(ui, browser, space_id, _name, _theme));
+}
+
+fn space_bubble(
+    ui: &mut egui::Ui,
+    space_id: SpaceId,
+    color: SpaceColor,
+    selected: bool,
+    theme: &Theme,
+) -> egui::Response {
+    let tokens = &theme.tokens;
+    let component = &tokens.component.space_switcher;
+    let (rect, response) = ui
+        .push_id(space_id, |ui| {
+            ui.allocate_exact_size(
+                egui::Vec2::splat(component.bubble_hit_size),
+                egui::Sense::click(),
+            )
+        })
+        .inner;
+    let id = response.id;
+    let hover = ui.ctx().animate_bool_with_time_and_easing(
+        id.with("hover"),
+        response.hovered(),
+        tokens.primitive.motion.space_bubble_seconds,
+        egui::emath::easing::cubic_out,
+    );
+    let active = ui.ctx().animate_bool_with_time_and_easing(
+        id.with("active"),
+        selected,
+        tokens.primitive.motion.space_bubble_seconds,
+        egui::emath::easing::cubic_out,
+    );
+    let center = rect.center();
+    let base_radius = component.bubble_size * 0.5;
+    let radius = base_radius + hover * 0.35 + active * 0.5;
+    let color = space_color(color, theme);
+    let painter = ui.painter();
+
+    let selection_strength = (active * 0.9 + hover * 0.45).min(1.0);
+    let selection = with_alpha(
+        tokens.semantic.color.surface_active,
+        (f32::from(tokens.semantic.color.surface_active.a()) * selection_strength) as u8,
+    );
+    painter.rect_filled(
+        rect.shrink(tokens.primitive.space.xxs),
+        tokens.primitive.radius.round,
+        selection,
+    );
+    let seed = (id.value() & 0xffff) as f32 / 65_535.0 * std::f32::consts::TAU;
+    let time = ui.input(|input| input.time) as f32;
+    paint_energy_orb(
+        painter,
+        center,
+        radius,
+        color,
+        seed + time * 0.22,
+        active,
+        hover,
+    );
+    if selected || response.hovered() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(40));
+    }
+    if response.has_focus() {
+        painter.rect_stroke(
+            rect.shrink(tokens.primitive.space.xxs),
+            tokens.primitive.radius.round,
+            egui::Stroke::new(tokens.primitive.stroke.thin, tokens.semantic.color.focus),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_energy_orb(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    color: egui::Color32,
+    phase: f32,
+    active: f32,
+    hover: f32,
+) {
+    let energy = active.max(hover);
+    painter.circle_filled(
+        center,
+        radius + 5.0,
+        with_alpha(color, (10.0 + energy * 18.0) as u8),
+    );
+    painter.circle_filled(
+        center,
+        radius + 2.5,
+        with_alpha(color, (24.0 + energy * 22.0) as u8),
+    );
+    painter.circle_filled(center, radius, mix_color(color, egui::Color32::BLACK, 0.12));
+    painter.circle_filled(
+        center,
+        radius * 0.88,
+        with_alpha(mix_color(color, egui::Color32::WHITE, 0.28), 80),
+    );
+
+    let strand_color = mix_color(color, egui::Color32::WHITE, 0.72);
+    let point_count = 28;
+    for strand in 0..9 {
+        let strand = strand as f32;
+        let mut points = Vec::with_capacity(point_count);
+        for point in 0..point_count {
+            let angle = std::f32::consts::TAU * point as f32 / point_count as f32;
+            let ripple = (angle * 3.0 + phase * (0.7 + strand * 0.035) + strand * 1.31).sin()
+                + 0.5 * (angle * 7.0 - phase * 0.45 + strand * 0.83).sin();
+            let strand_radius = radius * (0.82 + strand * 0.015 + ripple * 0.035);
+            points.push(center + egui::vec2(angle.cos(), angle.sin()) * strand_radius);
+        }
+        painter.add(egui::Shape::closed_line(
+            points,
+            egui::Stroke::new(
+                0.35 + energy * 0.12,
+                with_alpha(strand_color, (32.0 + energy * 26.0) as u8),
+            ),
+        ));
+    }
+
+    for strand in 0..6 {
+        let strand = strand as f32;
+        let rotation = phase * (0.12 + strand * 0.014) + strand * 0.91;
+        let (sin_rotation, cos_rotation) = rotation.sin_cos();
+        let mut points = Vec::with_capacity(point_count);
+        for point in 0..point_count {
+            let angle = std::f32::consts::TAU * point as f32 / point_count as f32;
+            let x = angle.cos() * radius * (0.72 + 0.025 * strand);
+            let y = angle.sin()
+                * radius
+                * (0.18 + 0.035 * strand + 0.025 * (angle * 4.0 + phase).sin());
+            points.push(
+                center
+                    + egui::vec2(
+                        x * cos_rotation - y * sin_rotation,
+                        x * sin_rotation + y * cos_rotation,
+                    ),
+            );
+        }
+        painter.add(egui::Shape::closed_line(
+            points,
+            egui::Stroke::new(0.35, with_alpha(strand_color, (18.0 + energy * 18.0) as u8)),
+        ));
+    }
+
+    for (offset, strength) in [(0.35, 1.0), (3.42, 0.75)] {
+        let angle = phase * 0.55 + offset;
+        let hotspot = center + egui::vec2(angle.cos(), angle.sin()) * radius * 0.86;
+        painter.circle_filled(
+            hotspot,
+            2.8 + energy,
+            with_alpha(color, (18.0 + energy * 22.0) as u8),
+        );
+        painter.circle_filled(
+            hotspot,
+            1.1 + energy * strength,
+            with_alpha(egui::Color32::WHITE, (115.0 + energy * 90.0) as u8),
+        );
+    }
+}
+
+fn add_space_bubble(ui: &mut egui::Ui, theme: &Theme) -> egui::Response {
+    let tokens = &theme.tokens;
+    let component = &tokens.component.space_switcher;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::Vec2::splat(component.bubble_hit_size),
+        egui::Sense::click(),
+    );
+    let hover = ui.ctx().animate_bool_with_time_and_easing(
+        response.id.with("hover"),
+        response.hovered(),
+        tokens.primitive.motion.space_bubble_seconds,
+        egui::emath::easing::cubic_out,
+    );
+    let center = rect.center();
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect.shrink(tokens.primitive.space.xxs),
+        tokens.primitive.radius.round,
+        with_alpha(tokens.semantic.color.surface_active, (120.0 * hover) as u8),
+    );
+    let arm = tokens.primitive.space.xs + hover;
+    let stroke = egui::Stroke::new(
+        tokens.primitive.stroke.thin,
+        mix_color(
+            tokens.semantic.color.text_muted,
+            tokens.semantic.color.text_strong,
+            hover,
+        ),
+    );
+    painter.line_segment(
+        [center - egui::vec2(arm, 0.0), center + egui::vec2(arm, 0.0)],
+        stroke,
+    );
+    painter.line_segment(
+        [center - egui::vec2(0.0, arm), center + egui::vec2(0.0, arm)],
+        stroke,
+    );
+    response
+}
+
+#[cfg(not(target_os = "macos"))]
 fn space_context_menu(
     ui: &mut egui::Ui,
     browser: &mut BrowserState,
@@ -351,7 +586,7 @@ fn space_context_menu(
             if ui
                 .add(
                     egui::Button::new("")
-                        .fill(space_color(color))
+                        .fill(space_color(color, theme))
                         .min_size(egui::Vec2::splat(22.0))
                         .corner_radius(11.0),
                 )
@@ -378,6 +613,56 @@ fn space_context_menu(
             .data_mut(|data| data.insert_temp(egui::Id::new("space-delete-confirm"), space_id));
         ui.close();
     }
+}
+
+fn rename_space_dialog(ui: &mut egui::Ui, browser: &mut BrowserState, theme: &Theme) {
+    let dialog_id = egui::Id::new("space-rename-dialog");
+    let Some(space_id) = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<SpaceId>(dialog_id))
+    else {
+        return;
+    };
+    if browser.space(space_id).is_none() {
+        ui.ctx().data_mut(|data| data.remove::<SpaceId>(dialog_id));
+        return;
+    }
+
+    let value_id = egui::Id::new(("space-rename-value", space_id));
+    let mut name = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<String>(value_id))
+        .unwrap_or_default();
+    egui::Window::new("Rename Space")
+        .id(egui::Id::new("rename-space-window"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ui.ctx(), |ui| {
+            let response = ui.text_edit_singleline(&mut name);
+            response.request_focus();
+            let submit =
+                response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            ui.horizontal(|ui| {
+                if DsButton::new("Cancel").show(ui, theme).clicked() {
+                    close_space_rename_dialog(ui, dialog_id, value_id);
+                }
+                if (DsButton::new("Rename").show(ui, theme).clicked() || submit)
+                    && !name.trim().is_empty()
+                {
+                    browser.rename_space(space_id, &name);
+                    close_space_rename_dialog(ui, dialog_id, value_id);
+                }
+            });
+        });
+    ui.ctx().data_mut(|data| data.insert_temp(value_id, name));
+}
+
+fn close_space_rename_dialog(ui: &egui::Ui, dialog_id: egui::Id, value_id: egui::Id) {
+    ui.ctx().data_mut(|data| {
+        data.remove::<SpaceId>(dialog_id);
+        data.remove::<String>(value_id);
+    });
 }
 
 fn confirm_space_deletion(
@@ -420,18 +705,39 @@ pub(crate) fn has_modal_open(context: &egui::Context) -> bool {
     context.data_mut(|data| {
         data.get_temp::<SpaceId>(egui::Id::new("space-delete-confirm"))
             .is_some()
+            || data
+                .get_temp::<SpaceId>(egui::Id::new("space-rename-dialog"))
+                .is_some()
     })
 }
 
-fn space_color(color: SpaceColor) -> egui::Color32 {
+fn space_color(color: SpaceColor, theme: &Theme) -> egui::Color32 {
+    let primitive = &theme.tokens.primitive.color;
     match color {
-        SpaceColor::Violet => egui::Color32::from_rgb(124, 92, 220),
-        SpaceColor::Blue => egui::Color32::from_rgb(45, 115, 220),
-        SpaceColor::Green => egui::Color32::from_rgb(38, 148, 110),
-        SpaceColor::Amber => egui::Color32::from_rgb(207, 132, 30),
-        SpaceColor::Rose => egui::Color32::from_rgb(211, 74, 112),
-        SpaceColor::Slate => egui::Color32::from_rgb(91, 105, 132),
+        SpaceColor::Violet => primitive.violet_400,
+        SpaceColor::Blue => primitive.blue_500,
+        SpaceColor::Green => primitive.green_400,
+        SpaceColor::Amber => primitive.amber_400,
+        SpaceColor::Rose => primitive.rose_400,
+        SpaceColor::Slate => primitive.slate_400,
     }
+}
+
+fn with_alpha(color: egui::Color32, alpha: u8) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
+fn mix_color(a: egui::Color32, b: egui::Color32, amount: f32) -> egui::Color32 {
+    let amount = amount.clamp(0.0, 1.0);
+    let mix = |left: u8, right: u8| {
+        (f32::from(left) + (f32::from(right) - f32::from(left)) * amount).round() as u8
+    };
+    egui::Color32::from_rgba_unmultiplied(
+        mix(a.r(), b.r()),
+        mix(a.g(), b.g()),
+        mix(a.b(), b.b()),
+        mix(a.a(), b.a()),
+    )
 }
 
 fn highlighted_pinned_tabs(
@@ -1302,6 +1608,19 @@ mod tests {
         let context = egui::Context::default();
         let space_id = BrowserState::default().active_space().id();
         let state_id = egui::Id::new("space-delete-confirm");
+
+        context.data_mut(|data| data.insert_temp(state_id, space_id));
+        assert!(has_modal_open(&context));
+
+        context.data_mut(|data| data.remove::<SpaceId>(state_id));
+        assert!(!has_modal_open(&context));
+    }
+
+    #[test]
+    fn rename_dialog_marks_the_native_surface_as_obscured() {
+        let context = egui::Context::default();
+        let space_id = BrowserState::default().active_space().id();
+        let state_id = egui::Id::new("space-rename-dialog");
 
         context.data_mut(|data| data.insert_temp(state_id, space_id));
         assert!(has_modal_open(&context));

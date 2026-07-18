@@ -2,8 +2,8 @@ use eframe::egui;
 
 use super::tokens::{
     ButtonTokens, ColorPrimitives, ComponentTokens, InputTokens, MenuTokens, MotionTokens,
-    PrimitiveTokens, RadiusTokens, SemanticColors, SemanticTokens, SizeTokens, SpaceTokens,
-    StrokeTokens, TabTokens, Tokens, TypographyTokens,
+    PrimitiveTokens, RadiusTokens, SemanticColors, SemanticTokens, SizeTokens, SpaceSwitcherTokens,
+    SpaceTokens, StrokeTokens, TabTokens, Tokens, TypographyTokens,
 };
 
 #[derive(Clone)]
@@ -53,7 +53,11 @@ impl Theme {
             navy_700: egui::Color32::from_rgb(28, 51, 100),
             navy_900: egui::Color32::from_rgb(9, 24, 56),
             mint_300: egui::Color32::from_rgb(140, 228, 205),
+            green_400: egui::Color32::from_rgb(45, 161, 121),
             violet_400: egui::Color32::from_rgb(132, 109, 239),
+            amber_400: egui::Color32::from_rgb(235, 164, 69),
+            rose_400: egui::Color32::from_rgb(232, 102, 139),
+            slate_400: egui::Color32::from_rgb(108, 127, 162),
             red_400: egui::Color32::from_rgb(248, 105, 105),
         };
 
@@ -99,6 +103,7 @@ impl Theme {
             sidebar_collapse_seconds: 0.26,
             space_switch_seconds: 0.24,
             tab_reorder_seconds: 0.16,
+            space_bubble_seconds: 0.2,
         };
 
         let semantic = SemanticTokens {
@@ -149,6 +154,10 @@ impl Theme {
                 height: 36.0,
                 radius: radius.md,
                 close_size: 24.0,
+            },
+            space_switcher: SpaceSwitcherTokens {
+                bubble_size: 26.0,
+                bubble_hit_size: 36.0,
             },
         };
 

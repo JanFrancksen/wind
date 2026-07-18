@@ -1,4 +1,20 @@
-use crate::{browser::TabAction, ds::theming::ThemeAppearance};
+use crate::{
+    browser::{SpaceColor, SpaceId, TabAction},
+    ds::theming::ThemeAppearance,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpaceMenuActionKind {
+    Rename,
+    Recolor(SpaceColor),
+    Delete,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpaceMenuAction {
+    pub space_id: SpaceId,
+    pub kind: SpaceMenuActionKind,
+}
 
 #[cfg(target_os = "macos")]
 mod platform {
@@ -17,8 +33,8 @@ mod platform {
     };
     use objc2_foundation::{NSObject, NSPoint, NSString};
 
-    use super::ThemeAppearance;
-    use crate::browser::{Tab, TabAction, TabActionKind};
+    use super::{SpaceMenuAction, SpaceMenuActionKind, ThemeAppearance};
+    use crate::browser::{SpaceColor, SpaceId, Tab, TabAction, TabActionKind};
 
     const NO_THEME_REQUEST: u8 = 0;
     const THEME_CHOICES: [(&str, ThemeAppearance); 2] = [
@@ -30,6 +46,9 @@ mod platform {
     static OPEN_TAB_ID: Mutex<Option<crate::browser::TabId>> = Mutex::new(None);
     static OPEN_TAB_ACTIONS: Mutex<Vec<TabActionKind>> = Mutex::new(Vec::new());
     static TAB_REQUESTS: Mutex<VecDeque<TabAction>> = Mutex::new(VecDeque::new());
+    static OPEN_SPACE_ID: Mutex<Option<SpaceId>> = Mutex::new(None);
+    static OPEN_SPACE_ACTIONS: Mutex<Vec<SpaceMenuActionKind>> = Mutex::new(Vec::new());
+    static SPACE_REQUESTS: Mutex<VecDeque<SpaceMenuAction>> = Mutex::new(VecDeque::new());
     static REPAINT_CONTEXT: OnceLock<egui::Context> = OnceLock::new();
 
     define_class!(
@@ -85,6 +104,29 @@ mod platform {
                     .lock()
                     .expect("tab menu request lock poisoned")
                     .push_back(TabAction::new(tab_id, action));
+                if let Some(context) = REPAINT_CONTEXT.get() {
+                    context.request_repaint();
+                }
+            }
+
+            #[unsafe(method(selectSpaceAction:))]
+            fn select_space_action(&self, sender: &NSMenuItem) {
+                let Some(kind) = OPEN_SPACE_ACTIONS
+                    .lock()
+                    .expect("open space actions lock poisoned")
+                    .get(sender.tag().saturating_sub(1) as usize)
+                    .copied()
+                else {
+                    return;
+                };
+                let Some(space_id) = *OPEN_SPACE_ID.lock().expect("open space menu lock poisoned")
+                else {
+                    return;
+                };
+                SPACE_REQUESTS
+                    .lock()
+                    .expect("space menu request lock poisoned")
+                    .push_back(SpaceMenuAction { space_id, kind });
                 if let Some(context) = REPAINT_CONTEXT.get() {
                     context.request_repaint();
                 }
@@ -174,6 +216,33 @@ mod platform {
         // popup call below. NSMenuItem's target property is weak.
         unsafe { item.setTarget(Some(target)) };
         menu.addItem(&item);
+    }
+
+    fn add_space_action(
+        menu: &NSMenu,
+        target: &MenuTarget,
+        mtm: MainThreadMarker,
+        title: &str,
+        action: SpaceMenuActionKind,
+        enabled: bool,
+    ) -> Retained<NSMenuItem> {
+        // SAFETY: `selectSpaceAction:` is implemented by MenuTarget with the
+        // NSMenuItem sender signature expected by AppKit.
+        let item = unsafe { menu_item(mtm, title, Some(sel!(selectSpaceAction:))) };
+        let tag = {
+            let mut actions = OPEN_SPACE_ACTIONS
+                .lock()
+                .expect("open space actions lock poisoned");
+            actions.push(action);
+            actions.len()
+        };
+        item.setTag(tag as isize);
+        item.setEnabled(enabled);
+        // SAFETY: The target remains alive for the duration of the synchronous
+        // popup call below. NSMenuItem's target property is weak.
+        unsafe { item.setTarget(Some(target)) };
+        menu.addItem(&item);
+        item
     }
 
     fn app_menu_insertion_index(menu: &NSMenu) -> isize {
@@ -347,13 +416,122 @@ mod platform {
             .collect()
     }
 
+    fn space_color_title(color: SpaceColor) -> &'static str {
+        match color {
+            SpaceColor::Violet => "Violet",
+            SpaceColor::Blue => "Blue",
+            SpaceColor::Green => "Green",
+            SpaceColor::Amber => "Amber",
+            SpaceColor::Rose => "Rose",
+            SpaceColor::Slate => "Slate",
+        }
+    }
+
+    fn show_space_context_menu_deferred(
+        space_id: SpaceId,
+        current_color: SpaceColor,
+        can_delete: bool,
+    ) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        let Some(window) = app.keyWindow().or_else(|| app.mainWindow()) else {
+            return;
+        };
+        let Some(view) = window.contentView() else {
+            return;
+        };
+        let location = menu_location_in_view(
+            window.mouseLocationOutsideOfEventStream(),
+            view.bounds().size.height,
+            view.isFlipped(),
+        );
+
+        let target = MenuTarget::new(mtm);
+        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Space"));
+        menu.setAutoenablesItems(false);
+
+        OPEN_SPACE_ACTIONS
+            .lock()
+            .expect("open space actions lock poisoned")
+            .clear();
+
+        add_space_action(
+            &menu,
+            &target,
+            mtm,
+            "Rename…",
+            SpaceMenuActionKind::Rename,
+            true,
+        );
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+        let color_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Color"));
+        color_menu.setAutoenablesItems(false);
+        for color in SpaceColor::ALL {
+            let item = add_space_action(
+                &color_menu,
+                &target,
+                mtm,
+                space_color_title(color),
+                SpaceMenuActionKind::Recolor(color),
+                true,
+            );
+            item.setState(if color == current_color {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+        }
+        // SAFETY: `None` is a valid action selector for a submenu root.
+        let color_root = unsafe { menu_item(mtm, "Color", None) };
+        color_root.setSubmenu(Some(&color_menu));
+        menu.addItem(&color_root);
+
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        add_space_action(
+            &menu,
+            &target,
+            mtm,
+            "Delete Space…",
+            SpaceMenuActionKind::Delete,
+            can_delete,
+        );
+
+        *OPEN_SPACE_ID.lock().expect("open space menu lock poisoned") = Some(space_id);
+        menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(&view));
+        *OPEN_SPACE_ID.lock().expect("open space menu lock poisoned") = None;
+        OPEN_SPACE_ACTIONS
+            .lock()
+            .expect("open space actions lock poisoned")
+            .clear();
+    }
+
+    pub fn show_space_context_menu(space_id: SpaceId, current_color: SpaceColor, can_delete: bool) {
+        dispatch::Queue::main().exec_async(move || {
+            show_space_context_menu_deferred(space_id, current_color, can_delete);
+        });
+    }
+
+    pub fn take_space_menu_requests() -> Vec<SpaceMenuAction> {
+        SPACE_REQUESTS
+            .lock()
+            .expect("space menu request lock poisoned")
+            .drain(..)
+            .collect()
+    }
+
     #[cfg(test)]
     mod tests {
         use super::{
-            TAB_REQUESTS, TabActionKind, menu_location_in_view, tab_action_for_tag, tab_action_tag,
-            take_tab_menu_requests,
+            SPACE_REQUESTS, TAB_REQUESTS, TabActionKind, menu_location_in_view, tab_action_for_tag,
+            tab_action_tag, take_space_menu_requests, take_tab_menu_requests,
         };
-        use crate::browser::{BrowserState, TabAction};
+        use crate::{
+            browser::{BrowserState, SpaceColor, TabAction},
+            native_menu::{SpaceMenuAction, SpaceMenuActionKind},
+        };
         use objc2_foundation::NSPoint;
 
         #[test]
@@ -392,6 +570,34 @@ mod platform {
 
             assert_eq!(take_tab_menu_requests(), expected);
             assert!(take_tab_menu_requests().is_empty());
+        }
+
+        #[test]
+        fn native_space_actions_are_drained_in_arrival_order() {
+            let browser = BrowserState::default();
+            let space_id = browser.active_space().id();
+            let expected = vec![
+                SpaceMenuAction {
+                    space_id,
+                    kind: SpaceMenuActionKind::Rename,
+                },
+                SpaceMenuAction {
+                    space_id,
+                    kind: SpaceMenuActionKind::Recolor(SpaceColor::Amber),
+                },
+                SpaceMenuAction {
+                    space_id,
+                    kind: SpaceMenuActionKind::Delete,
+                },
+            ];
+            {
+                let mut requests = SPACE_REQUESTS.lock().unwrap();
+                requests.clear();
+                requests.extend(expected.iter().copied());
+            }
+
+            assert_eq!(take_space_menu_requests(), expected);
+            assert!(take_space_menu_requests().is_empty());
         }
 
         #[test]
@@ -442,6 +648,22 @@ pub fn take_tab_menu_requests() -> Vec<TabAction> {
     #[cfg(target_os = "macos")]
     {
         platform::take_tab_menu_requests()
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
+pub fn show_space_context_menu(_space_id: SpaceId, _current_color: SpaceColor, _can_delete: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        platform::show_space_context_menu(_space_id, _current_color, _can_delete);
+    }
+}
+
+pub fn take_space_menu_requests() -> Vec<SpaceMenuAction> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::take_space_menu_requests()
     }
     #[cfg(not(target_os = "macos"))]
     Vec::new()

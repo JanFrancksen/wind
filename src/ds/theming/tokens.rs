@@ -40,7 +40,11 @@ pub struct ColorPrimitives {
     pub navy_700: egui::Color32,
     pub navy_900: egui::Color32,
     pub mint_300: egui::Color32,
+    pub green_400: egui::Color32,
     pub violet_400: egui::Color32,
+    pub amber_400: egui::Color32,
+    pub rose_400: egui::Color32,
+    pub slate_400: egui::Color32,
     pub red_400: egui::Color32,
 }
 
@@ -92,6 +96,7 @@ pub struct MotionTokens {
     pub sidebar_collapse_seconds: f32,
     pub space_switch_seconds: f32,
     pub tab_reorder_seconds: f32,
+    pub space_bubble_seconds: f32,
 }
 
 #[derive(Clone)]
@@ -129,6 +134,7 @@ pub struct ComponentTokens {
     pub input: InputTokens,
     pub menu: MenuTokens,
     pub tab: TabTokens,
+    pub space_switcher: SpaceSwitcherTokens,
 }
 
 #[derive(Clone)]
@@ -160,4 +166,10 @@ pub struct TabTokens {
     pub height: f32,
     pub radius: u8,
     pub close_size: f32,
+}
+
+#[derive(Clone)]
+pub struct SpaceSwitcherTokens {
+    pub bubble_size: f32,
+    pub bubble_hit_size: f32,
 }
