@@ -97,6 +97,7 @@ impl Theme {
 
         let motion = MotionTokens {
             sidebar_collapse_seconds: 0.26,
+            space_switch_seconds: 0.24,
             tab_reorder_seconds: 0.16,
         };
 

@@ -27,6 +27,14 @@ struct DropTarget {
     index: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SpaceTransition {
+    current: SpaceId,
+    outgoing: Option<SpaceId>,
+    direction: f32,
+    started_at: f64,
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     browser: &mut BrowserState,
@@ -34,16 +42,108 @@ pub fn show(
     theme: &Theme,
     sidebar_collapsed: &mut bool,
 ) -> bool {
-    let space = &theme.tokens.primitive.space;
     #[allow(unused_mut)]
     let mut toggle_theme = false;
 
     toolbar::show_compact(ui, browser, address_input, theme, sidebar_collapsed);
 
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+        space_switcher(ui, browser, address_input, theme);
+        #[cfg(not(target_os = "macos"))]
+        if DsButton::new("Toggle Theme")
+            .ghost()
+            .small()
+            .width(ui.available_width())
+            .show(ui, theme)
+            .clicked()
+        {
+            toggle_theme = true;
+        }
+
+        let (pane_rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+        show_space_tabs(ui, pane_rect, browser, address_input, theme);
+    });
+    confirm_space_deletion(ui, browser, address_input, theme);
+
+    toggle_theme
+}
+
+fn show_space_tabs(
+    ui: &mut egui::Ui,
+    pane_rect: egui::Rect,
+    browser: &mut BrowserState,
+    address_input: &mut String,
+    theme: &Theme,
+) {
+    let (outgoing, direction, progress) = space_transition(ui, browser, theme);
+    let (outgoing_x, incoming_x) = space_offsets(direction, progress, pane_rect.width());
+
+    if let Some(outgoing_id) = outgoing {
+        let mut old_browser = browser.clone();
+        if old_browser.switch_space(outgoing_id) {
+            let mut old_address = old_browser.active_url_for_input();
+            show_tab_layer(
+                ui,
+                pane_rect,
+                outgoing_x,
+                &mut old_browser,
+                &mut old_address,
+                theme,
+                false,
+            );
+        }
+    }
+
+    show_tab_layer(
+        ui,
+        pane_rect,
+        incoming_x,
+        browser,
+        address_input,
+        theme,
+        outgoing.is_none(),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show_tab_layer(
+    ui: &mut egui::Ui,
+    pane_rect: egui::Rect,
+    offset_x: f32,
+    browser: &mut BrowserState,
+    address_input: &mut String,
+    theme: &Theme,
+    interactive: bool,
+) {
+    let layer_rect = pane_rect.translate(egui::vec2(offset_x, 0.0));
+    let mut layer = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(layer_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    layer.set_clip_rect(pane_rect.intersect(ui.clip_rect()));
+    layer.add_enabled_ui(interactive, |ui| {
+        ui.push_id(("space-tabs", browser.active_space().id()), |ui| {
+            tabs_panel(ui, browser, address_input, theme, interactive);
+        });
+    });
+}
+
+fn tabs_panel(
+    ui: &mut egui::Ui,
+    browser: &mut BrowserState,
+    address_input: &mut String,
+    theme: &Theme,
+    interactive: bool,
+) {
+    let space = &theme.tokens.primitive.space;
+
     let dragging = egui::DragAndDrop::payload::<DraggedTab>(ui.ctx()).map(|payload| *payload);
     let mut drop_target = None;
     let mut actions = Vec::new();
-    actions.extend(native_menu::take_tab_menu_requests());
+    if interactive {
+        actions.extend(native_menu::take_tab_menu_requests());
+    }
 
     ui.add_space(space.lg);
     highlighted_pinned_tabs(ui, browser, theme, dragging, &mut drop_target, &mut actions);
@@ -82,23 +182,64 @@ pub fn show(
     }
 
     apply_tab_actions(browser, address_input, actions);
+}
 
-    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-        space_switcher(ui, browser, address_input, theme);
-        #[cfg(not(target_os = "macos"))]
-        if DsButton::new("Toggle Theme")
-            .ghost()
-            .small()
-            .width(ui.available_width())
-            .show(ui, theme)
-            .clicked()
-        {
-            toggle_theme = true;
-        }
-    });
-    confirm_space_deletion(ui, browser, address_input, theme);
+fn space_transition(
+    ui: &egui::Ui,
+    browser: &BrowserState,
+    theme: &Theme,
+) -> (Option<SpaceId>, f32, f32) {
+    let state_id = egui::Id::new("space-tab-transition");
+    let active = browser.active_space().id();
+    let now = ui.input(|input| input.time);
+    let mut state = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<SpaceTransition>(state_id))
+        .unwrap_or(SpaceTransition {
+            current: active,
+            outgoing: None,
+            direction: 1.0,
+            started_at: now,
+        });
 
-    toggle_theme
+    if state.current != active {
+        let previous_index = browser
+            .spaces()
+            .iter()
+            .position(|space| space.id() == state.current);
+        let active_index = browser
+            .spaces()
+            .iter()
+            .position(|space| space.id() == active)
+            .unwrap_or(0);
+        state.direction = if previous_index.is_some_and(|index| active_index < index) {
+            -1.0
+        } else {
+            1.0
+        };
+        state.outgoing = previous_index.map(|_| state.current);
+        state.current = active;
+        state.started_at = now;
+    }
+
+    let duration = f64::from(theme.tokens.primitive.motion.space_switch_seconds.max(0.01));
+    let linear = ((now - state.started_at) / duration).clamp(0.0, 1.0) as f32;
+    let progress = egui::emath::easing::sin_in_out(linear);
+    if linear >= 1.0 {
+        state.outgoing = None;
+    } else if state.outgoing.is_some() {
+        ui.ctx().request_repaint();
+    }
+    let result = (state.outgoing, state.direction, progress);
+    ui.ctx().data_mut(|data| data.insert_temp(state_id, state));
+    result
+}
+
+fn space_offsets(direction: f32, progress: f32, width: f32) -> (f32, f32) {
+    (
+        -direction * width * progress,
+        direction * width * (1.0 - progress),
+    )
 }
 
 fn space_switcher(
@@ -1110,7 +1251,22 @@ mod tests {
 
     use super::{
         grid_insertion_index, has_modal_open, normalized_favicon_image, row_insertion_index,
+        space_offsets,
     };
+
+    #[test]
+    fn forward_space_transition_moves_old_left_and_new_in_from_right() {
+        assert_eq!(space_offsets(1.0, 0.0, 240.0), (0.0, 240.0));
+        assert_eq!(space_offsets(1.0, 0.5, 240.0), (-120.0, 120.0));
+        assert_eq!(space_offsets(1.0, 1.0, 240.0), (-240.0, 0.0));
+    }
+
+    #[test]
+    fn backward_space_transition_mirrors_the_motion() {
+        assert_eq!(space_offsets(-1.0, 0.0, 240.0), (0.0, -240.0));
+        assert_eq!(space_offsets(-1.0, 0.5, 240.0), (120.0, -120.0));
+        assert_eq!(space_offsets(-1.0, 1.0, 240.0), (240.0, 0.0));
+    }
 
     #[test]
     fn deletion_confirmation_marks_the_native_surface_as_obscured() {
