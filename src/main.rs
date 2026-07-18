@@ -9,7 +9,7 @@ mod ui;
 
 use browser::BrowserState;
 use ds::theming::Theme;
-use persistence::{AppPaths, BrowserStore, ChromeState, PersistedAppState};
+use persistence::{AppPaths, AppStateStore, ChromeState, PersistedAppState};
 use renderer::BrowserRenderer;
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,7 @@ struct BrowserApp {
     theme: Theme,
     sidebar_width: f32,
     sidebar_collapsed: bool,
-    store: BrowserStore,
+    store: AppStateStore,
     chrome_dirty: bool,
     save_pending_since: Option<Instant>,
     last_cleanup_attempt: Option<Instant>,
@@ -34,7 +34,7 @@ impl BrowserApp {
     fn new(
         cef_available: bool,
         mut state: PersistedAppState,
-        store: BrowserStore,
+        store: AppStateStore,
         #[cfg(feature = "cef-renderer")] cef_runtime: Option<renderer::CefRuntime>,
     ) -> Self {
         state.browser.mark_clean();
@@ -161,15 +161,16 @@ impl eframe::App for BrowserApp {
     }
 
     fn on_exit(&mut self) {
-        let renderer_closed = self.renderer.shutdown_and_drain(Duration::from_secs(5));
-        #[cfg(not(feature = "cef-renderer"))]
-        let _ = renderer_closed;
+        let shutdown = self.renderer.shutdown_and_drain(Duration::from_secs(5));
+        if !shutdown.session_data_flushed {
+            eprintln!("Timed out flushing CEF cookie stores during shutdown");
+        }
         if let Err(error) = self.save_state() {
             eprintln!("Failed to save browser state during shutdown: {error}");
         }
         #[cfg(feature = "cef-renderer")]
         if let Some(runtime) = self.cef_runtime.take() {
-            if renderer_closed {
+            if shutdown.browsers_closed {
                 runtime.shutdown();
             } else {
                 // Global CEF shutdown is unsafe while browsers are still
@@ -203,10 +204,10 @@ fn main() -> eframe::Result<()> {
 
     // CEF child processes return above before touching browser state. Only the
     // browser process may load, migrate, clean, or save the shared snapshot.
-    let store = BrowserStore::new(paths.clone());
+    let store = AppStateStore::new(paths.clone());
     let mut state = store.load().unwrap_or_else(|error| {
         eprintln!("Failed to load browser state: {error}");
-        PersistedAppState::with_default_browser()
+        PersistedAppState::default()
     });
     for space_id in state.browser.pending_session_deletions().to_vec() {
         if store.delete_session_data(space_id).is_ok() {

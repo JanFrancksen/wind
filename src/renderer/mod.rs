@@ -95,6 +95,12 @@ pub struct BrowserRenderer {
     new_tab: new_tab::NewTabScene,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RendererShutdownOutcome {
+    pub session_data_flushed: bool,
+    pub browsers_closed: bool,
+}
+
 enum RendererBackend {
     Placeholder(placeholder::PlaceholderRenderer),
     #[cfg(feature = "cef-renderer")]
@@ -151,7 +157,7 @@ impl BrowserRenderer {
         }
     }
 
-    pub fn shutdown_and_drain(&mut self, timeout: Duration) -> bool {
+    pub fn shutdown_and_drain(&mut self, timeout: Duration) -> RendererShutdownOutcome {
         let deadline = Instant::now() + timeout;
         self.backend.flush_session_data();
         while !self.backend.session_data_flush_complete() && Instant::now() < deadline {
@@ -163,10 +169,16 @@ impl BrowserRenderer {
         self.backend.shutdown();
         loop {
             if self.backend.shutdown_complete() {
-                return session_data_flushed;
+                return RendererShutdownOutcome {
+                    session_data_flushed,
+                    browsers_closed: true,
+                };
             }
             if Instant::now() >= deadline {
-                return false;
+                return RendererShutdownOutcome {
+                    session_data_flushed,
+                    browsers_closed: false,
+                };
             }
             self.backend.tick();
             std::thread::sleep(Duration::from_millis(10));

@@ -66,14 +66,14 @@ impl AppPaths {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistedAppState {
     pub browser: BrowserState,
     pub chrome: ChromeState,
 }
 
-impl PersistedAppState {
-    pub fn with_default_browser() -> Self {
+impl Default for PersistedAppState {
+    fn default() -> Self {
         Self {
             browser: BrowserState::with_default_spaces("https://www.google.com"),
             chrome: ChromeState::default(),
@@ -82,6 +82,7 @@ impl PersistedAppState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChromeState {
     pub theme: ThemeAppearance,
     pub sidebar_width: f32,
@@ -112,6 +113,7 @@ impl ChromeState {
 struct StateFileV2 {
     version: u32,
     browser: BrowserState,
+    #[serde(default)]
     chrome: ChromeState,
 }
 
@@ -126,11 +128,11 @@ struct StateVersion {
     version: u32,
 }
 
-pub struct BrowserStore {
+pub struct AppStateStore {
     paths: AppPaths,
 }
 
-impl BrowserStore {
+impl AppStateStore {
     pub fn new(paths: AppPaths) -> Self {
         Self { paths }
     }
@@ -145,7 +147,7 @@ impl BrowserStore {
         let bytes = match fs::read(&state_path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(PersistedAppState::with_default_browser());
+                return Ok(PersistedAppState::default());
             }
             Err(error) => return Err(error),
         };
@@ -175,7 +177,7 @@ impl BrowserStore {
         }
 
         preserve_corrupt_state(&state_path)?;
-        Ok(PersistedAppState::with_default_browser())
+        Ok(PersistedAppState::default())
     }
 
     pub fn save(&self, state: &PersistedAppState) -> io::Result<()> {
@@ -220,7 +222,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{AppPaths, BrowserStore, ChromeState, PersistedAppState};
+    use super::{AppPaths, AppStateStore, ChromeState, PersistedAppState};
     use crate::browser::{BrowserState, SpaceColor, TabAction, TabActionKind, TabGroup};
     use crate::ds::theming::ThemeAppearance;
 
@@ -228,7 +230,7 @@ mod tests {
     fn browser_state_round_trips_all_spaces_and_active_tabs() {
         let directory = tempdir().unwrap();
         let paths = AppPaths::from_data_dir(directory.path().to_owned());
-        let store = BrowserStore::new(paths);
+        let store = AppStateStore::new(paths);
         let mut browser = BrowserState::with_initial_url("private.example");
         let private = browser.active_space().id();
         let private_tab = browser.active_tab().id;
@@ -237,6 +239,7 @@ mod tests {
             TabActionKind::Navigate("private-history.example".to_owned()),
         ));
         browser.apply_tab_action(TabAction::new(private_tab, TabActionKind::TogglePin));
+        browser.apply_tab_action(TabAction::new(private_tab, TabActionKind::Promote));
         let closed_tab = browser.add_tab("closed.example");
         browser.apply_tab_action(TabAction::new(closed_tab, TabActionKind::Close));
         let work = browser.create_space("Work", SpaceColor::Blue);
@@ -277,8 +280,9 @@ mod tests {
                 .unwrap()
                 .active_tab()
                 .group(),
-            TabGroup::Pinned
+            TabGroup::Highlight
         );
+        assert_eq!(restored.browser.active_tab().group(), TabGroup::Today);
         assert_eq!(restored.chrome.theme, ThemeAppearance::Night);
         assert_eq!(restored.chrome.sidebar_width, 336.0);
         assert!(restored.chrome.sidebar_collapsed);
@@ -293,7 +297,7 @@ mod tests {
         let paths = AppPaths::from_data_dir(directory.path().to_owned());
         fs::create_dir_all(paths.data_dir()).unwrap();
         fs::write(paths.state_file(), b"not json").unwrap();
-        let store = BrowserStore::new(paths.clone());
+        let store = AppStateStore::new(paths.clone());
 
         let restored = store.load().unwrap();
 
@@ -319,7 +323,7 @@ mod tests {
         };
         fs::write(paths.state_file(), serde_json::to_vec(&legacy).unwrap()).unwrap();
 
-        let restored = BrowserStore::new(paths).load().unwrap();
+        let restored = AppStateStore::new(paths).load().unwrap();
 
         assert_eq!(
             restored.browser.active_tab().url,
@@ -332,7 +336,7 @@ mod tests {
     fn invalid_sidebar_width_is_repaired_during_load() {
         let directory = tempdir().unwrap();
         let paths = AppPaths::from_data_dir(directory.path().to_owned());
-        let store = BrowserStore::new(paths);
+        let store = AppStateStore::new(paths);
         let state = PersistedAppState {
             browser: BrowserState::default(),
             chrome: ChromeState {
@@ -348,10 +352,36 @@ mod tests {
     }
 
     #[test]
+    fn missing_version_two_chrome_fields_use_defaults_without_losing_tabs() {
+        let directory = tempdir().unwrap();
+        let paths = AppPaths::from_data_dir(directory.path().to_owned());
+        fs::create_dir_all(paths.data_dir()).unwrap();
+        let state = serde_json::json!({
+            "version": super::STATE_VERSION,
+            "browser": BrowserState::with_initial_url("preserved.example"),
+            "chrome": { "theme": "Night" }
+        });
+        fs::write(paths.state_file(), serde_json::to_vec(&state).unwrap()).unwrap();
+
+        let restored = AppStateStore::new(paths).load().unwrap();
+
+        assert_eq!(
+            restored.browser.active_tab().url,
+            "https://preserved.example"
+        );
+        assert_eq!(restored.chrome.theme, ThemeAppearance::Night);
+        assert_eq!(
+            restored.chrome.sidebar_width,
+            ChromeState::default().sidebar_width
+        );
+        assert!(!restored.chrome.sidebar_collapsed);
+    }
+
+    #[test]
     fn deleted_space_session_data_is_removed_and_the_tombstone_can_be_cleared() {
         let directory = tempdir().unwrap();
         let paths = AppPaths::from_data_dir(directory.path().to_owned());
-        let store = BrowserStore::new(paths.clone());
+        let store = AppStateStore::new(paths.clone());
         let mut browser = BrowserState::default();
         let doomed = browser.create_space("Temporary", SpaceColor::Rose);
         let session_path = paths.request_context_path(doomed);
@@ -375,7 +405,7 @@ mod tests {
     fn semantically_corrupt_duplicate_space_ids_are_preserved_and_rejected() {
         let directory = tempdir().unwrap();
         let paths = AppPaths::from_data_dir(directory.path().to_owned());
-        let store = BrowserStore::new(paths.clone());
+        let store = AppStateStore::new(paths.clone());
         let browser = BrowserState::with_default_spaces("private.example");
         let mut state = serde_json::to_value(super::StateFileV2 {
             version: super::STATE_VERSION,
@@ -405,7 +435,7 @@ mod tests {
     fn unsupported_state_versions_are_preserved_and_rejected() {
         let directory = tempdir().unwrap();
         let paths = AppPaths::from_data_dir(directory.path().to_owned());
-        let store = BrowserStore::new(paths.clone());
+        let store = AppStateStore::new(paths.clone());
         fs::create_dir_all(paths.data_dir()).unwrap();
         let state = super::StateFileV2 {
             version: super::STATE_VERSION + 1,
