@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use crate::{
-    browser::{BrowserState, Tab, TabAction, TabActionKind, TabGroup, TabId},
+    browser::{BrowserState, SpaceColor, SpaceId, Tab, TabAction, TabActionKind, TabGroup, TabId},
     ds::{
         components::{DsButton, Icon, TabButton, divider},
         theming::Theme,
@@ -35,7 +35,7 @@ pub fn show(
     sidebar_collapsed: &mut bool,
 ) -> bool {
     let space = &theme.tokens.primitive.space;
-    #[cfg(not(target_os = "macos"))]
+    #[allow(unused_mut)]
     let mut toggle_theme = false;
 
     toolbar::show_compact(ui, browser, address_input, theme, sidebar_collapsed);
@@ -83,8 +83,9 @@ pub fn show(
 
     apply_tab_actions(browser, address_input, actions);
 
-    #[cfg(not(target_os = "macos"))]
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+        space_switcher(ui, browser, address_input, theme);
+        #[cfg(not(target_os = "macos"))]
         if DsButton::new("Toggle Theme")
             .ghost()
             .small()
@@ -95,14 +96,184 @@ pub fn show(
             toggle_theme = true;
         }
     });
+    confirm_space_deletion(ui, browser, address_input, theme);
 
-    #[cfg(target_os = "macos")]
+    toggle_theme
+}
+
+fn space_switcher(
+    ui: &mut egui::Ui,
+    browser: &mut BrowserState,
+    address_input: &mut String,
+    theme: &Theme,
+) {
+    let active = browser.active_space().id();
+    let spaces = browser
+        .spaces()
+        .iter()
+        .map(|space| (space.id(), space.name().to_owned(), space.color()))
+        .collect::<Vec<_>>();
+
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = theme.tokens.primitive.space.xs;
+        for (space_id, name, color) in spaces {
+            let selected = space_id == active;
+            let label = name
+                .chars()
+                .next()
+                .unwrap_or('S')
+                .to_uppercase()
+                .to_string();
+            let response = ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new(label)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(space_color(color))
+                    .selected(selected)
+                    .min_size(egui::vec2(30.0, 30.0))
+                    .corner_radius(15.0),
+                )
+                .on_hover_text(format!("{name} · Control+number"));
+            if response.clicked() && browser.switch_space(space_id) {
+                *address_input = browser.active_url_for_input();
+            }
+            response.context_menu(|ui| {
+                space_context_menu(ui, browser, space_id, &name, theme);
+            });
+        }
+
+        if DsButton::new("+")
+            .ghost()
+            .small()
+            .width(30.0)
+            .show(ui, theme)
+            .on_hover_text("Create space")
+            .clicked()
+        {
+            let ordinal = browser.spaces().len() + 1;
+            let color = SpaceColor::ALL[(ordinal - 1) % SpaceColor::ALL.len()];
+            let id = browser.create_space(format!("Space {ordinal}"), color);
+            browser.switch_space(id);
+            *address_input = browser.active_url_for_input();
+        }
+    });
+}
+
+fn space_context_menu(
+    ui: &mut egui::Ui,
+    browser: &mut BrowserState,
+    space_id: SpaceId,
+    current_name: &str,
+    theme: &Theme,
+) {
+    ui.set_min_width(190.0);
+    let rename_id = egui::Id::new(("space-rename", space_id));
+    let mut name = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<String>(rename_id))
+        .unwrap_or_else(|| current_name.to_owned());
+    ui.label("Space name");
+    let rename = ui.text_edit_singleline(&mut name);
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(rename_id, name.clone()));
+    if (rename.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+        || ui.button("Rename").clicked()
     {
-        false
+        browser.rename_space(space_id, name);
+        ui.close();
     }
-    #[cfg(not(target_os = "macos"))]
+
+    ui.separator();
+    ui.label("Color");
+    ui.horizontal_wrapped(|ui| {
+        for color in SpaceColor::ALL {
+            if ui
+                .add(
+                    egui::Button::new("")
+                        .fill(space_color(color))
+                        .min_size(egui::Vec2::splat(22.0))
+                        .corner_radius(11.0),
+                )
+                .clicked()
+            {
+                browser.recolor_space(space_id, color);
+                ui.close();
+            }
+        }
+    });
+
+    ui.separator();
+    let can_delete = browser.spaces().len() > 1;
+    if ui
+        .add_enabled(
+            can_delete,
+            egui::Button::new(
+                egui::RichText::new("Delete space…").color(theme.tokens.semantic.color.danger),
+            ),
+        )
+        .clicked()
     {
-        toggle_theme
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::new("space-delete-confirm"), space_id));
+        ui.close();
+    }
+}
+
+fn confirm_space_deletion(
+    ui: &mut egui::Ui,
+    browser: &mut BrowserState,
+    address_input: &mut String,
+    theme: &Theme,
+) {
+    let id = egui::Id::new("space-delete-confirm");
+    let Some(space_id) = ui.ctx().data_mut(|data| data.get_temp::<SpaceId>(id)) else {
+        return;
+    };
+    let name = browser
+        .space(space_id)
+        .map(|space| space.name().to_owned())
+        .unwrap_or_else(|| "this space".to_owned());
+    egui::Window::new("Delete space?")
+        .id(egui::Id::new("delete-space-window"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ui.ctx(), |ui| {
+            ui.label(format!(
+                "Delete {name}, all of its tabs, and its local cookies and site data?"
+            ));
+            ui.horizontal(|ui| {
+                if DsButton::new("Cancel").show(ui, theme).clicked() {
+                    ui.ctx().data_mut(|data| data.remove::<SpaceId>(id));
+                }
+                if DsButton::new("Delete").danger().show(ui, theme).clicked() {
+                    browser.delete_space(space_id);
+                    *address_input = browser.active_url_for_input();
+                    ui.ctx().data_mut(|data| data.remove::<SpaceId>(id));
+                }
+            });
+        });
+}
+
+pub(crate) fn has_modal_open(context: &egui::Context) -> bool {
+    context.data_mut(|data| {
+        data.get_temp::<SpaceId>(egui::Id::new("space-delete-confirm"))
+            .is_some()
+    })
+}
+
+fn space_color(color: SpaceColor) -> egui::Color32 {
+    match color {
+        SpaceColor::Violet => egui::Color32::from_rgb(124, 92, 220),
+        SpaceColor::Blue => egui::Color32::from_rgb(45, 115, 220),
+        SpaceColor::Green => egui::Color32::from_rgb(38, 148, 110),
+        SpaceColor::Amber => egui::Color32::from_rgb(207, 132, 30),
+        SpaceColor::Rose => egui::Color32::from_rgb(211, 74, 112),
+        SpaceColor::Slate => egui::Color32::from_rgb(91, 105, 132),
     }
 }
 
@@ -322,7 +493,7 @@ fn tab_context_menu(
             ui.separator();
         }
         let (label, icon) = tab_action_presentation(tab, kind);
-        let item = MenuItem::new(label, icon);
+        let item = MenuItem::new(&label, icon);
         let clicked = if matches!(kind, TabActionKind::Close) {
             item.danger().show(ui, theme).clicked()
         } else {
@@ -337,17 +508,18 @@ fn tab_context_menu(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn tab_action_presentation(tab: &Tab, kind: &TabActionKind) -> (&'static str, Icon) {
+fn tab_action_presentation(tab: &Tab, kind: &TabActionKind) -> (String, Icon) {
     match kind {
-        TabActionKind::ReturnToPinned => ("Return to pinned tab", Icon::ArrowLeft),
-        TabActionKind::Demote => ("Demote from highlight", Icon::ChevronDown),
-        TabActionKind::Promote => ("Promote to highlight", Icon::ChevronUp),
-        TabActionKind::TogglePin if tab.is_organized() => ("Unpin tab", Icon::Pin),
-        TabActionKind::TogglePin => ("Pin tab", Icon::Pin),
-        TabActionKind::MoveUp => ("Move up", Icon::ChevronUp),
-        TabActionKind::MoveDown => ("Move down", Icon::ChevronDown),
-        TabActionKind::Close => ("Close tab", Icon::X),
-        _ => ("Tab action", Icon::ArrowRight),
+        TabActionKind::ReturnToPinned => ("Return to pinned tab".to_owned(), Icon::ArrowLeft),
+        TabActionKind::Demote => ("Demote from highlight".to_owned(), Icon::ChevronDown),
+        TabActionKind::Promote => ("Promote to highlight".to_owned(), Icon::ChevronUp),
+        TabActionKind::TogglePin if tab.is_organized() => ("Unpin tab".to_owned(), Icon::Pin),
+        TabActionKind::TogglePin => ("Pin tab".to_owned(), Icon::Pin),
+        TabActionKind::MoveUp => ("Move up".to_owned(), Icon::ChevronUp),
+        TabActionKind::MoveDown => ("Move down".to_owned(), Icon::ChevronDown),
+        TabActionKind::MoveToSpace { name, .. } => (format!("Move to {name}"), Icon::ArrowRight),
+        TabActionKind::Close => ("Close tab".to_owned(), Icon::X),
+        _ => ("Tab action".to_owned(), Icon::ArrowRight),
     }
 }
 
@@ -355,7 +527,8 @@ fn tab_action_presentation(tab: &Tab, kind: &TabActionKind) -> (&'static str, Ic
 fn tab_action_section(kind: &TabActionKind) -> u8 {
     match kind {
         TabActionKind::MoveUp | TabActionKind::MoveDown => 1,
-        TabActionKind::Close => 2,
+        TabActionKind::MoveToSpace { .. } => 2,
+        TabActionKind::Close => 3,
         _ => 0,
     }
 }
@@ -933,9 +1106,24 @@ fn section_label(ui: &mut egui::Ui, label: &str, theme: &Theme) {
 mod tests {
     use eframe::egui;
 
-    use crate::browser::Favicon;
+    use crate::browser::{BrowserState, Favicon, SpaceId};
 
-    use super::{grid_insertion_index, normalized_favicon_image, row_insertion_index};
+    use super::{
+        grid_insertion_index, has_modal_open, normalized_favicon_image, row_insertion_index,
+    };
+
+    #[test]
+    fn deletion_confirmation_marks_the_native_surface_as_obscured() {
+        let context = egui::Context::default();
+        let space_id = BrowserState::default().active_space().id();
+        let state_id = egui::Id::new("space-delete-confirm");
+
+        context.data_mut(|data| data.insert_temp(state_id, space_id));
+        assert!(has_modal_open(&context));
+
+        context.data_mut(|data| data.remove::<SpaceId>(state_id));
+        assert!(!has_modal_open(&context));
+    }
 
     #[test]
     fn favicon_normalization_crops_transparent_margins_to_a_square() {

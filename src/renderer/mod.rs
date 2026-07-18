@@ -5,6 +5,9 @@ mod placeholder;
 #[cfg(feature = "cef-renderer")]
 mod cef;
 
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
 use eframe::egui;
 
 use crate::{
@@ -25,6 +28,7 @@ pub enum RendererStatus {
 pub enum AppShortcut {
     ToggleSidebar,
     NewTab,
+    SwitchSpace(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,9 +102,9 @@ enum RendererBackend {
 }
 
 impl BrowserRenderer {
-    pub fn new(cef_available: bool) -> Self {
+    pub fn new(cef_available: bool, request_context_root: PathBuf) -> Self {
         Self {
-            backend: RendererBackend::new_default(cef_available),
+            backend: RendererBackend::new_default(cef_available, request_context_root),
             new_tab: new_tab::NewTabScene::new(),
         }
     }
@@ -113,9 +117,10 @@ impl BrowserRenderer {
         address_input: &mut String,
         theme: &Theme,
         rect: egui::Rect,
+        chrome_modal_open: bool,
     ) {
         self.backend.set_repaint_context(ui.ctx());
-        self.backend.sync_tabs(browser.tab_ids());
+        self.backend.sync_tabs(browser.open_tabs());
         let response = ui.interact(
             rect,
             egui::Id::new("wind_browser_surface"),
@@ -135,7 +140,7 @@ impl BrowserRenderer {
             self.backend.focus();
         }
 
-        let popup_open = egui::Popup::is_any_open(ui.ctx());
+        let popup_open = egui::Popup::is_any_open(ui.ctx()) || chrome_modal_open;
         if should_show_native_surface(&status, popup_open) {
             self.backend.show();
         } else {
@@ -146,12 +151,27 @@ impl BrowserRenderer {
         }
     }
 
-    pub fn shutdown(&mut self) {
+    pub fn shutdown_and_drain(&mut self, timeout: Duration) -> bool {
         self.backend.shutdown();
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.backend.shutdown_complete() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            self.backend.tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     pub fn tick(&mut self) {
         self.backend.tick();
+    }
+
+    pub fn session_is_released(&self, space_id: crate::browser::SpaceId) -> bool {
+        self.backend.session_is_released(space_id)
     }
 
     pub fn take_shortcut_requests(&mut self) -> Vec<AppShortcut> {
@@ -177,16 +197,19 @@ fn should_show_native_surface(status: &RendererStatus, popup_open: bool) -> bool
 
 impl Default for BrowserRenderer {
     fn default() -> Self {
-        Self::new(false)
+        Self::new(
+            false,
+            std::env::temp_dir().join("wind-cef-request-contexts"),
+        )
     }
 }
 
 impl RendererBackend {
-    fn new_default(_cef_available: bool) -> Self {
+    fn new_default(_cef_available: bool, _request_context_root: PathBuf) -> Self {
         #[cfg(feature = "cef-renderer")]
         {
             if _cef_available {
-                return Self::Cef(cef::CefRenderer::new());
+                return Self::Cef(cef::CefRenderer::new(_request_context_root));
             }
         }
 
@@ -241,7 +264,7 @@ impl RendererBackend {
         }
     }
 
-    fn sync_tabs(&mut self, tab_ids: impl IntoIterator<Item = crate::browser::TabId>) {
+    fn sync_tabs(&mut self, tab_ids: impl IntoIterator<Item = crate::browser::OpenTab>) {
         #[cfg(feature = "cef-renderer")]
         if let Self::Cef(renderer) = self {
             renderer.sync_tabs(tab_ids);
@@ -280,11 +303,27 @@ impl RendererBackend {
         }
     }
 
+    fn shutdown_complete(&mut self) -> bool {
+        match self {
+            Self::Placeholder(_) => true,
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.shutdown_complete(),
+        }
+    }
+
     fn tick(&mut self) {
         match self {
             Self::Placeholder(renderer) => renderer.tick(),
             #[cfg(feature = "cef-renderer")]
             Self::Cef(renderer) => renderer.tick(),
+        }
+    }
+
+    fn session_is_released(&self, _space_id: crate::browser::SpaceId) -> bool {
+        match self {
+            Self::Placeholder(_) => true,
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.session_is_released(_space_id),
         }
     }
 }

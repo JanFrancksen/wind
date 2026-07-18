@@ -30,6 +30,11 @@ pub fn show_root(
         match shortcut {
             AppShortcut::ToggleSidebar => *sidebar_collapsed = !*sidebar_collapsed,
             AppShortcut::NewTab => open_new_tab(browser, address_input),
+            AppShortcut::SwitchSpace(index) => {
+                if browser.switch_space_by_index(index) {
+                    *address_input = browser.active_url_for_input();
+                }
+            }
         }
     }
     handle_sidebar_shortcut(ui, sidebar_collapsed);
@@ -63,7 +68,15 @@ pub fn show_root(
         );
     }
 
-    renderer.show_in_rect(ui, frame, browser, address_input, theme, layout.content);
+    renderer.show_in_rect(
+        ui,
+        frame,
+        browser,
+        address_input,
+        theme,
+        layout.content,
+        sidebar::has_modal_open(ui.ctx()),
+    );
 
     if sidebar_progress > 0.98 {
         invisible_sidebar_resize_handle(

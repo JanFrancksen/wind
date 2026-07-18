@@ -28,6 +28,7 @@ mod platform {
 
     static THEME_REQUEST: AtomicU8 = AtomicU8::new(NO_THEME_REQUEST);
     static OPEN_TAB_ID: Mutex<Option<crate::browser::TabId>> = Mutex::new(None);
+    static OPEN_TAB_ACTIONS: Mutex<Vec<TabActionKind>> = Mutex::new(Vec::new());
     static TAB_REQUESTS: Mutex<VecDeque<TabAction>> = Mutex::new(VecDeque::new());
     static REPAINT_CONTEXT: OnceLock<egui::Context> = OnceLock::new();
 
@@ -69,7 +70,12 @@ mod platform {
 
             #[unsafe(method(selectTabAction:))]
             fn select_tab_action(&self, sender: &NSMenuItem) {
-                let Some(action) = tab_action_for_tag(sender.tag() as u8) else {
+                let Some(action) = OPEN_TAB_ACTIONS
+                    .lock()
+                    .expect("open tab actions lock poisoned")
+                    .get(sender.tag().saturating_sub(1) as usize)
+                    .cloned()
+                else {
                     return;
                 };
                 let Some(tab_id) = *OPEN_TAB_ID.lock().expect("open tab menu lock poisoned") else {
@@ -117,6 +123,7 @@ mod platform {
         THEME_CHOICES.get(index).map(|(_, appearance)| *appearance)
     }
 
+    #[cfg(test)]
     const NATIVE_TAB_ACTIONS: [TabActionKind; 7] = [
         TabActionKind::ReturnToPinned,
         TabActionKind::Demote,
@@ -127,6 +134,7 @@ mod platform {
         TabActionKind::Close,
     ];
 
+    #[cfg(test)]
     fn tab_action_tag(action: &TabActionKind) -> Option<u8> {
         NATIVE_TAB_ACTIONS
             .iter()
@@ -134,6 +142,7 @@ mod platform {
             .map(|index| (index + 1) as u8)
     }
 
+    #[cfg(test)]
     fn tab_action_for_tag(tag: u8) -> Option<TabActionKind> {
         let index = usize::from(tag.checked_sub(1)?);
         NATIVE_TAB_ACTIONS.get(index).cloned()
@@ -155,15 +164,12 @@ mod platform {
         target: &MenuTarget,
         mtm: MainThreadMarker,
         title: &str,
-        action: &TabActionKind,
+        tag: usize,
     ) {
         // SAFETY: `selectTabAction:` is implemented by MenuTarget with the
         // NSMenuItem sender signature expected by AppKit.
         let item = unsafe { menu_item(mtm, title, Some(sel!(selectTabAction:))) };
-        let Some(tag) = tab_action_tag(action) else {
-            return;
-        };
-        item.setTag(tag.into());
+        item.setTag((tag + 1) as isize);
         // SAFETY: The target remains alive for the duration of the synchronous
         // popup call below. NSMenuItem's target property is weak.
         unsafe { item.setTarget(Some(target)) };
@@ -261,24 +267,26 @@ mod platform {
         appearance_for_tag(THEME_REQUEST.swap(NO_THEME_REQUEST, Ordering::AcqRel))
     }
 
-    fn tab_action_title(tab: &Tab, action: &TabActionKind) -> &'static str {
+    fn tab_action_title(tab: &Tab, action: &TabActionKind) -> String {
         match action {
-            TabActionKind::ReturnToPinned => "Return to Pinned Tab",
-            TabActionKind::Demote => "Remove from Highlights",
-            TabActionKind::Promote => "Add to Highlights",
-            TabActionKind::TogglePin if tab.is_organized() => "Unpin Tab",
-            TabActionKind::TogglePin => "Pin Tab",
-            TabActionKind::MoveUp => "Move Up",
-            TabActionKind::MoveDown => "Move Down",
-            TabActionKind::Close => "Close Tab",
-            _ => "Tab Action",
+            TabActionKind::ReturnToPinned => "Return to Pinned Tab".to_owned(),
+            TabActionKind::Demote => "Remove from Highlights".to_owned(),
+            TabActionKind::Promote => "Add to Highlights".to_owned(),
+            TabActionKind::TogglePin if tab.is_organized() => "Unpin Tab".to_owned(),
+            TabActionKind::TogglePin => "Pin Tab".to_owned(),
+            TabActionKind::MoveUp => "Move Up".to_owned(),
+            TabActionKind::MoveDown => "Move Down".to_owned(),
+            TabActionKind::MoveToSpace { name, .. } => format!("Move to {name}"),
+            TabActionKind::Close => "Close Tab".to_owned(),
+            _ => "Tab Action".to_owned(),
         }
     }
 
     fn tab_action_section(action: &TabActionKind) -> u8 {
         match action {
             TabActionKind::MoveUp | TabActionKind::MoveDown => 1,
-            TabActionKind::Close => 2,
+            TabActionKind::MoveToSpace { .. } => 2,
+            TabActionKind::Close => 3,
             _ => 0,
         }
     }
@@ -305,18 +313,25 @@ mod platform {
         menu.setAutoenablesItems(false);
 
         let mut previous_section = None;
-        for action in actions {
+        *OPEN_TAB_ACTIONS
+            .lock()
+            .expect("open tab actions lock poisoned") = actions.to_vec();
+        for (tag, action) in actions.iter().enumerate() {
             let section = tab_action_section(action);
             if previous_section.is_some_and(|previous| previous != section) {
                 menu.addItem(&NSMenuItem::separatorItem(mtm));
             }
-            add_tab_action(&menu, &target, mtm, tab_action_title(tab, action), action);
+            add_tab_action(&menu, &target, mtm, &tab_action_title(tab, action), tag);
             previous_section = Some(section);
         }
 
         *OPEN_TAB_ID.lock().expect("open tab menu lock poisoned") = Some(tab.id);
         menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(&view));
         *OPEN_TAB_ID.lock().expect("open tab menu lock poisoned") = None;
+        OPEN_TAB_ACTIONS
+            .lock()
+            .expect("open tab actions lock poisoned")
+            .clear();
     }
 
     pub fn show_tab_context_menu(tab: &Tab, actions: Vec<TabActionKind>) {

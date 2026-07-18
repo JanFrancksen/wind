@@ -1,7 +1,46 @@
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub struct TabId(u64);
+use std::{
+    collections::HashSet,
+    ops::{Deref, DerefMut},
+};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabId(Uuid);
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceId(Uuid);
+
+impl SpaceId {
+    pub fn cache_key(self) -> String {
+        self.0.simple().to_string()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpaceColor {
+    #[default]
+    Violet,
+    Blue,
+    Green,
+    Amber,
+    Rose,
+    Slate,
+}
+
+impl SpaceColor {
+    pub const ALL: [Self; 6] = [
+        Self::Violet,
+        Self::Blue,
+        Self::Green,
+        Self::Amber,
+        Self::Rose,
+        Self::Slate,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TabGroup {
     Highlight,
     Pinned,
@@ -34,6 +73,7 @@ pub enum TabActionKind {
     Demote,
     MoveUp,
     MoveDown,
+    MoveToSpace { space_id: SpaceId, name: String },
     ReturnToPinned,
     Place { group: TabGroup, index: usize },
 }
@@ -106,6 +146,9 @@ pub enum AddressAction {
     Back,
     Forward,
     Reload,
+    SwitchSpace(String),
+    NextSpace,
+    PreviousSpace,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,7 +163,7 @@ impl AddressActionOutcome {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tab {
     pub id: TabId,
     pub title: String,
@@ -128,13 +171,17 @@ pub struct Tab {
     pub history: Vec<String>,
     pub history_index: usize,
     state: TabState,
+    #[serde(skip)]
     pub favicon: Option<Favicon>,
+    #[serde(skip)]
     pub favicon_revision: u64,
+    #[serde(skip)]
     pub render_revision: u64,
+    #[serde(skip)]
     pub session_revision: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 enum TabState {
     Today,
     Organized {
@@ -144,13 +191,13 @@ enum TabState {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum OrganizedGroup {
     Pinned,
     Highlight,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum OrganizedSession {
     Open,
     Closed,
@@ -262,6 +309,7 @@ impl Favicon {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActivePage {
+    pub space_id: SpaceId,
     pub tab_id: TabId,
     pub url: String,
     pub render_revision: u64,
@@ -276,8 +324,8 @@ struct ActivePageSnapshot {
 }
 
 impl ActivePageSnapshot {
-    fn capture(browser: &BrowserState) -> Self {
-        let tab = browser.active_tab();
+    fn capture(space: &Space) -> Self {
+        let tab = space.active_tab();
         Self {
             tab_id: tab.id,
             url: tab.url.clone(),
@@ -285,8 +333,8 @@ impl ActivePageSnapshot {
         }
     }
 
-    fn change_to(&self, browser: &BrowserState) -> ActivePageChange {
-        let tab = browser.active_tab();
+    fn change_to(&self, space: &Space) -> ActivePageChange {
+        let tab = space.active_tab();
         if tab.id != self.tab_id {
             ActivePageChange::TabChanged
         } else if (tab.url.as_str(), tab.render_revision)
@@ -299,23 +347,29 @@ impl ActivePageSnapshot {
     }
 }
 
-#[derive(Debug)]
-pub struct BrowserState {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Space {
+    id: SpaceId,
+    name: String,
+    color: SpaceColor,
     tabs: Vec<Tab>,
     active_tab: usize,
-    next_tab_id: u64,
     recently_closed: Vec<RecentlyClosedTab>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct RecentlyClosedTab {
     title: String,
     url: String,
     history: Vec<String>,
     history_index: usize,
+    #[serde(skip)]
     favicon: Option<Favicon>,
+    #[serde(skip)]
     favicon_revision: u64,
+    #[serde(skip)]
     render_revision: u64,
+    #[serde(skip)]
     session_revision: u64,
 }
 
@@ -335,22 +389,30 @@ impl From<Tab> for RecentlyClosedTab {
     }
 }
 
-impl Default for BrowserState {
-    fn default() -> Self {
-        Self::with_initial_url("arc://new-tab")
-    }
-}
-
-impl BrowserState {
-    pub fn with_initial_url(input: &str) -> Self {
-        let mut browser = Self {
+impl Space {
+    fn with_initial_url(name: impl Into<String>, color: SpaceColor, input: &str) -> Self {
+        let mut space = Self {
+            id: SpaceId(Uuid::new_v4()),
+            name: name.into(),
+            color,
             tabs: Vec::new(),
             active_tab: 0,
-            next_tab_id: 1,
             recently_closed: Vec::new(),
         };
-        browser.add_tab(input);
-        browser
+        space.add_tab(input);
+        space
+    }
+
+    pub fn id(&self) -> SpaceId {
+        self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn color(&self) -> SpaceColor {
+        self.color
     }
 
     pub fn tabs(&self) -> &[Tab] {
@@ -381,17 +443,6 @@ impl BrowserState {
             String::new()
         } else {
             url.clone()
-        }
-    }
-
-    pub fn active_page(&self) -> ActivePage {
-        let tab = self.active_tab();
-
-        ActivePage {
-            tab_id: tab.id,
-            url: tab.url.clone(),
-            render_revision: tab.render_revision,
-            session_revision: tab.session_revision,
         }
     }
 
@@ -488,6 +539,7 @@ impl BrowserState {
             TabActionKind::Demote => self.set_group(action.tab_id, TabGroup::Pinned),
             TabActionKind::MoveUp => self.move_tab_by(action.tab_id, -1),
             TabActionKind::MoveDown => self.move_tab_by(action.tab_id, 1),
+            TabActionKind::MoveToSpace { .. } => false,
             TabActionKind::ReturnToPinned => self.return_to_pinned(action.tab_id),
             TabActionKind::Place { group, index } => self.place_tab(action.tab_id, group, index),
         };
@@ -508,6 +560,7 @@ impl BrowserState {
 
         tab.url = url.clone();
         tab.title = title_for_url(&url);
+        clear_favicon(tab);
         tab.history.truncate(tab.history_index + 1);
         tab.history.push(url);
         tab.history_index = tab.history.len() - 1;
@@ -523,6 +576,9 @@ impl BrowserState {
     }
 
     pub fn set_favicon(&mut self, tab_id: TabId, page_revision: u64, favicon: Option<Favicon>) {
+        let Some(favicon) = favicon else {
+            return;
+        };
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
             return;
         };
@@ -530,8 +586,8 @@ impl BrowserState {
             return;
         }
 
-        if tab.favicon != favicon {
-            tab.favicon = favicon;
+        if tab.favicon.as_ref() != Some(&favicon) {
+            tab.favicon = Some(favicon);
             tab.favicon_revision += 1;
         }
     }
@@ -598,6 +654,11 @@ impl BrowserState {
                 self.apply_tab_action(TabAction::new(active_id, TabActionKind::Reload))
                     .status
             }
+            AddressAction::SwitchSpace(_)
+            | AddressAction::NextSpace
+            | AddressAction::PreviousSpace => {
+                TabActionStatus::NotApplied(TabActionRejection::Unavailable)
+            }
         };
 
         AddressActionOutcome {
@@ -607,9 +668,7 @@ impl BrowserState {
     }
 
     fn next_id(&mut self) -> TabId {
-        let id = TabId(self.next_tab_id);
-        self.next_tab_id += 1;
-        id
+        TabId(Uuid::new_v4())
     }
 
     fn new_tab(&mut self, input: &str) -> Tab {
@@ -659,6 +718,7 @@ impl BrowserState {
             TabActionKind::Demote => tab.group() == TabGroup::Highlight,
             TabActionKind::MoveUp => self.can_move(action.tab_id, -1),
             TabActionKind::MoveDown => self.can_move(action.tab_id, 1),
+            TabActionKind::MoveToSpace { .. } => false,
             TabActionKind::ReturnToPinned => tab.is_away_from_pinned(),
             TabActionKind::Place { .. } => true,
         }
@@ -917,6 +977,435 @@ impl BrowserState {
             .position(|tab| tab.id == active_id)
             .unwrap_or(0);
     }
+
+    fn take_open_tab_for_transfer(&mut self, tab_id: TabId) -> Option<Tab> {
+        let index = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == tab_id && tab.is_open())?;
+        let was_active = self.active_tab == index;
+        let tab = self.tabs.remove(index);
+        if was_active {
+            self.activate_near(index);
+        } else if self.active_tab > index {
+            self.active_tab -= 1;
+        }
+        Some(tab)
+    }
+
+    fn receive_transferred_tab(&mut self, mut tab: Tab) {
+        let tab_id = tab.id;
+        tab.session_revision = tab.session_revision.wrapping_add(1);
+        tab.render_revision = tab.render_revision.wrapping_add(1);
+        clear_favicon(&mut tab);
+        self.tabs.push(tab);
+        self.sort_tabs();
+        self.active_tab = self
+            .tab_index(tab_id)
+            .expect("transferred tab was inserted");
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct OpenTab {
+    pub space_id: SpaceId,
+    pub tab_id: TabId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BrowserState {
+    spaces: Vec<Space>,
+    active_space_id: SpaceId,
+    #[serde(default)]
+    pending_session_deletions: Vec<SpaceId>,
+    #[serde(skip)]
+    dirty: bool,
+    #[serde(skip)]
+    urgent_save: bool,
+}
+
+impl Default for BrowserState {
+    fn default() -> Self {
+        Self::with_initial_url("arc://new-tab")
+    }
+}
+
+impl BrowserState {
+    pub fn with_initial_url(input: &str) -> Self {
+        let private = Space::with_initial_url("Private", SpaceColor::Violet, input);
+        Self {
+            active_space_id: private.id,
+            spaces: vec![private],
+            pending_session_deletions: Vec::new(),
+            dirty: true,
+            urgent_save: false,
+        }
+    }
+
+    pub fn with_default_spaces(initial_url: &str) -> Self {
+        let private = Space::with_initial_url("Private", SpaceColor::Violet, initial_url);
+        let work = Space::with_initial_url("Work", SpaceColor::Blue, "arc://new-tab");
+        Self {
+            active_space_id: private.id,
+            spaces: vec![private, work],
+            pending_session_deletions: Vec::new(),
+            dirty: true,
+            urgent_save: false,
+        }
+    }
+
+    pub fn spaces(&self) -> &[Space] {
+        &self.spaces
+    }
+
+    pub fn active_space(&self) -> &Space {
+        self.spaces
+            .iter()
+            .find(|space| space.id == self.active_space_id)
+            .expect("browser always has an active space")
+    }
+
+    fn active_space_mut(&mut self) -> &mut Space {
+        self.dirty = true;
+        let active_space_id = self.active_space_id;
+        self.spaces
+            .iter_mut()
+            .find(|space| space.id == active_space_id)
+            .expect("browser always has an active space")
+    }
+
+    pub fn space(&self, id: SpaceId) -> Option<&Space> {
+        self.spaces.iter().find(|space| space.id == id)
+    }
+
+    pub fn create_space(&mut self, name: impl Into<String>, color: SpaceColor) -> SpaceId {
+        let name = normalized_space_name(name.into(), self.spaces.len() + 1);
+        let space = Space::with_initial_url(name, color, "arc://new-tab");
+        let id = space.id;
+        self.spaces.push(space);
+        self.dirty = true;
+        id
+    }
+
+    pub fn rename_space(&mut self, id: SpaceId, name: impl Into<String>) -> bool {
+        let Some(space) = self.spaces.iter_mut().find(|space| space.id == id) else {
+            return false;
+        };
+        let name = name.into();
+        let trimmed = name.trim();
+        if trimmed.is_empty() || space.name == trimmed {
+            return false;
+        }
+        space.name = trimmed.to_owned();
+        self.dirty = true;
+        true
+    }
+
+    pub fn recolor_space(&mut self, id: SpaceId, color: SpaceColor) -> bool {
+        let Some(space) = self.spaces.iter_mut().find(|space| space.id == id) else {
+            return false;
+        };
+        if space.color == color {
+            return false;
+        }
+        space.color = color;
+        self.dirty = true;
+        true
+    }
+
+    pub fn switch_space(&mut self, id: SpaceId) -> bool {
+        if id == self.active_space_id || self.space(id).is_none() {
+            return false;
+        }
+        self.active_space_id = id;
+        self.dirty = true;
+        true
+    }
+
+    pub fn switch_space_by_index(&mut self, index: usize) -> bool {
+        self.spaces
+            .get(index)
+            .map(|space| space.id)
+            .is_some_and(|id| self.switch_space(id))
+    }
+
+    pub fn switch_space_by_offset(&mut self, offset: isize) -> bool {
+        let Some(index) = self
+            .spaces
+            .iter()
+            .position(|space| space.id == self.active_space_id)
+        else {
+            return false;
+        };
+        let len = self.spaces.len() as isize;
+        let target = (index as isize + offset).rem_euclid(len) as usize;
+        self.switch_space_by_index(target)
+    }
+
+    pub fn switch_space_named(&mut self, name: &str) -> bool {
+        let id = self
+            .spaces
+            .iter()
+            .find(|space| space.name.eq_ignore_ascii_case(name.trim()))
+            .map(|space| space.id);
+        id.is_some_and(|id| self.switch_space(id))
+    }
+
+    pub fn delete_space(&mut self, id: SpaceId) -> bool {
+        if self.spaces.len() == 1 {
+            return false;
+        }
+        let Some(index) = self.spaces.iter().position(|space| space.id == id) else {
+            return false;
+        };
+        self.spaces.remove(index);
+        self.pending_session_deletions.push(id);
+        if self.active_space_id == id {
+            self.active_space_id = self.spaces[index.min(self.spaces.len() - 1)].id;
+        }
+        self.dirty = true;
+        self.urgent_save = true;
+        true
+    }
+
+    pub fn move_tab_to_space(&mut self, tab_id: TabId, destination: SpaceId) -> bool {
+        let Some(source_index) = self.spaces.iter().position(|space| {
+            space
+                .tabs
+                .iter()
+                .any(|tab| tab.id == tab_id && tab.is_open())
+        }) else {
+            return false;
+        };
+        let Some(destination_index) = self.spaces.iter().position(|space| space.id == destination)
+        else {
+            return false;
+        };
+        if source_index == destination_index {
+            return false;
+        }
+
+        let tab = self.spaces[source_index]
+            .take_open_tab_for_transfer(tab_id)
+            .expect("source tab was located above");
+        self.spaces[destination_index].receive_transferred_tab(tab);
+        self.dirty = true;
+        true
+    }
+
+    pub fn context_actions(&self, tab_id: TabId) -> Vec<TabActionKind> {
+        let mut actions = self.active_space().context_actions(tab_id);
+        let can_move_between_spaces = self
+            .active_space()
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .is_some_and(Tab::is_open);
+        if !can_move_between_spaces {
+            return actions;
+        }
+        let close = actions
+            .iter()
+            .position(|action| matches!(action, TabActionKind::Close));
+        let insertion = close.unwrap_or(actions.len());
+        let moves = self
+            .spaces
+            .iter()
+            .filter(|space| space.id != self.active_space_id)
+            .map(|space| TabActionKind::MoveToSpace {
+                space_id: space.id,
+                name: space.name.clone(),
+            })
+            .collect::<Vec<_>>();
+        actions.splice(insertion..insertion, moves);
+        actions
+    }
+
+    pub fn apply_tab_action(&mut self, action: TabAction) -> TabActionOutcome {
+        if let TabActionKind::MoveToSpace { space_id, .. } = &action.kind {
+            return if self.move_tab_to_space(action.tab_id, *space_id) {
+                TabActionOutcome::applied(ActivePageChange::TabChanged)
+            } else {
+                TabActionOutcome::rejected(TabActionRejection::Unavailable)
+            };
+        }
+        self.active_space_mut().apply_tab_action(action)
+    }
+
+    pub fn active_page(&self) -> ActivePage {
+        let space = self.active_space();
+        let tab = space.active_tab();
+        ActivePage {
+            space_id: space.id,
+            tab_id: tab.id,
+            url: tab.url.clone(),
+            render_revision: tab.render_revision,
+            session_revision: tab.session_revision,
+        }
+    }
+
+    pub fn open_tabs(&self) -> impl Iterator<Item = OpenTab> + '_ {
+        self.spaces.iter().flat_map(|space| {
+            space.tab_ids().map(|tab_id| OpenTab {
+                space_id: space.id,
+                tab_id,
+            })
+        })
+    }
+
+    pub fn set_page_url(&mut self, tab_id: TabId, page_revision: u64, url: String) {
+        if let Some(space) = self.space_containing_tab_mut(tab_id) {
+            space.set_page_url(tab_id, page_revision, url);
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_page_title(&mut self, tab_id: TabId, page_revision: u64, title: String) {
+        if let Some(space) = self.space_containing_tab_mut(tab_id) {
+            space.set_page_title(tab_id, page_revision, title);
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_favicon(&mut self, tab_id: TabId, page_revision: u64, favicon: Option<Favicon>) {
+        if let Some(space) = self.space_containing_tab_mut(tab_id) {
+            space.set_favicon(tab_id, page_revision, favicon);
+        }
+    }
+
+    fn space_containing_tab_mut(&mut self, tab_id: TabId) -> Option<&mut Space> {
+        self.spaces
+            .iter_mut()
+            .find(|space| space.tabs.iter().any(|tab| tab.id == tab_id))
+    }
+
+    pub fn submit_address_input(&mut self, input: &str) -> AddressActionOutcome {
+        match parse_address_action(input) {
+            AddressAction::SwitchSpace(name) => {
+                simple_address_outcome(self.switch_space_named(&name))
+            }
+            AddressAction::NextSpace => simple_address_outcome(self.switch_space_by_offset(1)),
+            AddressAction::PreviousSpace => simple_address_outcome(self.switch_space_by_offset(-1)),
+            _ => self.active_space_mut().submit_address_input(input),
+        }
+    }
+
+    pub fn pending_session_deletions(&self) -> &[SpaceId] {
+        &self.pending_session_deletions
+    }
+
+    pub fn mark_session_deleted(&mut self, id: SpaceId) {
+        self.pending_session_deletions
+            .retain(|candidate| *candidate != id);
+        self.dirty = true;
+    }
+
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+
+    pub fn take_urgent_save(&mut self) -> bool {
+        std::mem::take(&mut self.urgent_save)
+    }
+
+    pub(crate) fn mark_clean(&mut self) {
+        self.dirty = false;
+        self.urgent_save = false;
+    }
+
+    pub(crate) fn repair_after_load(&mut self) {
+        if self.spaces.is_empty() {
+            *self = Self::with_default_spaces("arc://new-tab");
+            return;
+        }
+        for space in &mut self.spaces {
+            space.name = normalized_space_name(std::mem::take(&mut space.name), 1);
+            if space.tabs.is_empty() {
+                space.add_tab("arc://new-tab");
+            }
+            space.active_tab = space.active_tab.min(space.tabs.len() - 1);
+            if !space.tabs[space.active_tab].is_open() {
+                space.activate_near(space.active_tab);
+            }
+        }
+        if self.space(self.active_space_id).is_none() {
+            self.active_space_id = self.spaces[0].id;
+        }
+        self.dirty = false;
+        self.urgent_save = false;
+    }
+
+    pub(crate) fn snapshot_is_valid(&self) -> bool {
+        if self.spaces.is_empty()
+            || !self
+                .spaces
+                .iter()
+                .any(|space| space.id == self.active_space_id)
+        {
+            return false;
+        }
+        let mut space_ids = HashSet::new();
+        let mut tab_ids = HashSet::new();
+        for space in &self.spaces {
+            if !space_ids.insert(space.id)
+                || space.name.trim().is_empty()
+                || space.tabs.is_empty()
+                || space.active_tab >= space.tabs.len()
+                || !space.tabs[space.active_tab].is_open()
+            {
+                return false;
+            }
+            for tab in &space.tabs {
+                if !tab_ids.insert(tab.id)
+                    || tab.history.is_empty()
+                    || tab.history_index >= tab.history.len()
+                {
+                    return false;
+                }
+            }
+        }
+        self.pending_session_deletions
+            .iter()
+            .all(|deleted| !space_ids.contains(deleted))
+    }
+}
+
+impl Deref for BrowserState {
+    type Target = Space;
+
+    fn deref(&self) -> &Self::Target {
+        self.active_space()
+    }
+}
+
+impl DerefMut for BrowserState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.active_space_mut()
+    }
+}
+
+fn normalized_space_name(name: String, ordinal: usize) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        format!("Space {ordinal}")
+    } else {
+        name.to_owned()
+    }
+}
+
+fn simple_address_outcome(applied: bool) -> AddressActionOutcome {
+    AddressActionOutcome {
+        status: if applied {
+            TabActionStatus::Applied
+        } else {
+            TabActionStatus::NotApplied(TabActionRejection::Unavailable)
+        },
+        active_page_change: if applied {
+            ActivePageChange::TabChanged
+        } else {
+            ActivePageChange::None
+        },
+    }
 }
 
 fn clear_favicon(tab: &mut Tab) {
@@ -974,6 +1463,12 @@ pub fn parse_address_action(input: &str) -> AddressAction {
             "back" => AddressAction::Back,
             "forward" => AddressAction::Forward,
             "reload" | "refresh" => AddressAction::Reload,
+            "space" => rest.map_or_else(
+                || AddressAction::Navigate(trimmed.to_string()),
+                |name| AddressAction::SwitchSpace(name.to_owned()),
+            ),
+            "next-space" => AddressAction::NextSpace,
+            "previous-space" | "prev-space" => AddressAction::PreviousSpace,
             _ => AddressAction::Navigate(trimmed.to_string()),
         };
     }
@@ -1026,9 +1521,9 @@ fn title_for_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivePageChange, AddressAction, BrowserState, Favicon, TabAction, TabActionKind,
-        TabActionOutcome, TabActionRejection, TabActionStatus, TabGroup, normalize_url,
-        parse_address_action,
+        ActivePageChange, AddressAction, BrowserState, Favicon, SpaceColor, TabAction,
+        TabActionKind, TabActionOutcome, TabActionRejection, TabActionStatus, TabGroup,
+        normalize_url, parse_address_action,
     };
 
     fn apply(
@@ -1336,6 +1831,32 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_same_page_favicon_update_does_not_discard_the_loaded_icon() {
+        let mut browser = BrowserState::with_initial_url("example.com");
+        let tab_id = browser.active_page().tab_id;
+        let favicon = Favicon::from_rgba(1, 1, vec![10, 20, 30, 255]).unwrap();
+
+        browser.set_favicon(tab_id, 0, Some(favicon.clone()));
+        browser.set_favicon(tab_id, 0, None);
+
+        assert_eq!(browser.active_tab().favicon, Some(favicon));
+        assert_eq!(browser.active_tab().favicon_revision, 1);
+    }
+
+    #[test]
+    fn page_initiated_navigation_clears_the_previous_pages_favicon() {
+        let mut browser = BrowserState::with_initial_url("example.com");
+        let tab_id = browser.active_page().tab_id;
+        let favicon = Favicon::from_rgba(1, 1, vec![10, 20, 30, 255]).unwrap();
+        browser.set_favicon(tab_id, 0, Some(favicon));
+
+        browser.set_page_url(tab_id, 0, "https://rust-lang.org".to_string());
+
+        assert_eq!(browser.active_tab().favicon, None);
+        assert_eq!(browser.active_tab().favicon_revision, 2);
+    }
+
+    #[test]
     fn ignores_a_favicon_download_from_an_old_page_revision() {
         let mut browser = BrowserState::with_initial_url("example.com");
         let tab_id = browser.active_page().tab_id;
@@ -1552,5 +2073,131 @@ mod tests {
             outcome.status,
             super::TabActionStatus::NotApplied(super::TabActionRejection::Unavailable)
         );
+    }
+
+    #[test]
+    fn spaces_keep_independent_tabs_and_selection() {
+        let mut browser = BrowserState::with_initial_url("private.example");
+        let private = browser.active_space().id();
+        let work = browser.create_space("Work", SpaceColor::Blue);
+
+        assert!(browser.switch_space(work));
+        browser.add_tab("work.example");
+        assert_eq!(browser.active_tab().url, "https://work.example");
+
+        assert!(browser.switch_space(private));
+        assert_eq!(browser.active_tab().url, "https://private.example");
+        assert_ne!(
+            browser.active_tab().id,
+            browser.space(work).unwrap().active_tab().id
+        );
+    }
+
+    #[test]
+    fn moving_a_tab_reloads_it_in_the_destination_space() {
+        let mut browser = BrowserState::with_initial_url("private.example");
+        let private = browser.active_space().id();
+        let moved = browser.active_tab().id;
+        let work = browser.create_space("Work", SpaceColor::Blue);
+
+        assert!(browser.move_tab_to_space(moved, work));
+        assert_eq!(browser.active_space().id(), private);
+        assert_ne!(browser.active_tab().id, moved);
+        let moved_tab = browser
+            .space(work)
+            .unwrap()
+            .tabs()
+            .iter()
+            .find(|tab| tab.id == moved)
+            .unwrap();
+        assert_eq!(moved_tab.url, "https://private.example");
+        assert_eq!(moved_tab.session_revision, 1);
+    }
+
+    #[test]
+    fn moving_a_background_tab_preserves_history_and_organization() {
+        let mut browser = BrowserState::with_initial_url("home.example");
+        let moved = browser.active_tab().id;
+        apply_active(
+            &mut browser,
+            TabActionKind::Navigate("away.example".to_owned()),
+        );
+        apply_active(&mut browser, TabActionKind::TogglePin);
+        let remaining = browser.add_tab("remaining.example");
+        let work = browser.create_space("Work", SpaceColor::Blue);
+
+        assert!(browser.move_tab_to_space(moved, work));
+        assert_eq!(browser.active_tab().id, remaining);
+        let moved_tab = browser
+            .space(work)
+            .unwrap()
+            .tabs()
+            .iter()
+            .find(|tab| tab.id == moved)
+            .unwrap();
+        assert_eq!(moved_tab.group(), TabGroup::Pinned);
+        assert_eq!(
+            moved_tab.history,
+            vec!["https://home.example", "https://away.example"]
+        );
+    }
+
+    #[test]
+    fn the_last_space_cannot_be_deleted() {
+        let mut browser = BrowserState::default();
+        let only = browser.active_space().id();
+
+        assert!(!browser.delete_space(only));
+        assert_eq!(browser.spaces().len(), 1);
+        assert!(browser.pending_session_deletions().is_empty());
+    }
+
+    #[test]
+    fn deleting_the_active_space_selects_a_neighbor_and_tombstones_its_session() {
+        let mut browser = BrowserState::with_default_spaces("private.example");
+        let private = browser.active_space().id();
+        let work = browser.spaces()[1].id();
+
+        assert!(browser.delete_space(private));
+        assert_eq!(browser.active_space().id(), work);
+        assert_eq!(browser.pending_session_deletions(), &[private]);
+        assert!(browser.take_urgent_save());
+    }
+
+    #[test]
+    fn deleted_space_ids_are_never_reused() {
+        let mut browser = BrowserState::default();
+        let deleted = browser.create_space("Temporary", SpaceColor::Rose);
+        assert!(browser.delete_space(deleted));
+
+        let replacement = browser.create_space("Replacement", SpaceColor::Rose);
+
+        assert_ne!(replacement, deleted);
+    }
+
+    #[test]
+    fn space_commands_switch_by_name_and_cycle() {
+        let mut browser = BrowserState::with_default_spaces("private.example");
+        let private = browser.active_space().id();
+        let work = browser.spaces()[1].id();
+
+        assert!(
+            browser
+                .submit_address_input(":space work")
+                .active_page_changed()
+        );
+        assert_eq!(browser.active_space().id(), work);
+        assert!(
+            browser
+                .submit_address_input(":next-space")
+                .active_page_changed()
+        );
+        assert_eq!(browser.active_space().id(), private);
+        assert!(
+            browser
+                .submit_address_input(":previous-space")
+                .active_page_changed()
+        );
+        assert_eq!(browser.active_space().id(), work);
     }
 }

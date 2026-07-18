@@ -8,7 +8,7 @@ This file tracks the next browser features after the design-system and shell-lay
 - [x] Add command palette actions for new tab, close tab, duplicate tab, reopen closed tab, pin tab, reorder tab, back, forward, and reload.
 - [x] Support empty input as a new-tab page state instead of navigating to a placeholder URL.
 - [x] Add keyboard shortcuts for new tab, close tab, reopen closed tab, reload, back, and forward.
-- [ ] Add command palette actions for switching spaces once real spaces exist.
+- [x] Add command palette actions for switching spaces once real spaces exist.
 
 ## Tab Model
 
@@ -21,8 +21,8 @@ This file tracks the next browser features after the design-system and shell-lay
 
 ## Spaces and Sidebar
 
-- Add real Arc-style spaces/workspaces.
-- Persist active space and per-space tabs.
+- [x] Add real Arc-style spaces/workspaces with isolated login sessions.
+- [x] Persist active space and per-space tabs.
 - Add sidebar sections for pinned tabs, today tabs, and archived/recent tabs.
 - Add sidebar collapse and compact mode.
 - Add hover, focus, and active states for tab rows.

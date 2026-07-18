@@ -3,18 +3,20 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fmt,
+    path::PathBuf,
     rc::Rc,
 };
 
 #[cfg(target_os = "macos")]
-use std::{ffi::CString, os::unix::ffi::OsStrExt, path::PathBuf};
+use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
 use cef::sys::cef_window_handle_t;
 use cef::*;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{
-    browser::{Favicon, TabId},
+    browser::{Favicon, OpenTab, SpaceId, TabId},
+    persistence::AppPaths,
     renderer::{
         AppShortcut, FaviconUpdate, PageTarget, PageTitleUpdate, PageUrlUpdate, PhysicalRect,
         RendererStatus, favicon,
@@ -39,7 +41,7 @@ pub enum CefRuntimeError {
 }
 
 impl CefRuntime {
-    pub fn initialize() -> Result<Self, CefRuntimeError> {
+    pub fn initialize(paths: &AppPaths) -> Result<Self, CefRuntimeError> {
         #[cfg(target_os = "macos")]
         platform::initialize_application()?;
 
@@ -68,6 +70,7 @@ impl CefRuntime {
             no_sandbox: 1,
             external_message_pump: 1,
             remote_debugging_port: 9222,
+            root_cache_path: CefString::from(paths.cef_root().to_string_lossy().as_ref()),
             ..Default::default()
         };
 
@@ -243,6 +246,8 @@ pub struct CefRenderer {
     closing_tabs: Vec<CefTab>,
     active_tab: Option<TabId>,
     surface_visible: bool,
+    request_context_root: PathBuf,
+    request_contexts: HashMap<SpaceId, RequestContext>,
 }
 
 type SharedEventBridge = Rc<CefEventBridge>;
@@ -359,19 +364,6 @@ impl CefEventBridge {
         })
     }
 
-    fn begin_favicon_clear_request(&self, tab_id: TabId) -> Option<FaviconRequest> {
-        let mut requests = self.favicon_requests.borrow_mut();
-        let entry = requests.get_mut(&tab_id)?;
-        entry.preferred_icon_seen = false;
-        entry.fallback_requested = true;
-        entry.generation += 1;
-        Some(FaviconRequest {
-            tab_id,
-            page_revision: entry.page_revision,
-            generation: entry.generation,
-        })
-    }
-
     fn submit_favicon(&self, request: FaviconRequest, favicon: Option<Favicon>) {
         let is_current = self
             .favicon_requests
@@ -455,6 +447,7 @@ impl CefEventBridge {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LoadedPage {
+    space_id: SpaceId,
     url: String,
     revision: u64,
     session_revision: u64,
@@ -470,13 +463,15 @@ struct CefTab {
 }
 
 impl CefRenderer {
-    pub fn new() -> Self {
+    pub fn new(request_context_root: PathBuf) -> Self {
         Self {
             events: Rc::new(CefEventBridge::default()),
             tabs: HashMap::new(),
             closing_tabs: Vec::new(),
             active_tab: None,
             surface_visible: true,
+            request_context_root,
+            request_contexts: HashMap::new(),
         }
     }
 
@@ -485,11 +480,10 @@ impl CefRenderer {
             return RendererStatus::UnsupportedUrl(target.page.url.clone());
         }
 
-        if self
-            .tabs
-            .get(&target.page.tab_id)
-            .is_some_and(|tab| tab.loaded.session_revision != target.page.session_revision)
-        {
+        if self.tabs.get(&target.page.tab_id).is_some_and(|tab| {
+            tab.loaded.space_id != target.page.space_id
+                || tab.loaded.session_revision != target.page.session_revision
+        }) {
             self.close_renderer_tab(target.page.tab_id);
         }
         self.set_active_tab(target.page.tab_id);
@@ -539,15 +533,21 @@ impl CefRenderer {
     }
 
     pub fn shutdown(&mut self) {
-        for tab in self.tabs.values() {
-            let browser = request_browser_close(&tab.browser);
-            if let Some(host) = browser.and_then(|browser| browser.host()) {
-                host.close_browser(1);
-            }
+        let tab_ids = self.tabs.keys().copied().collect::<Vec<_>>();
+        for tab_id in tab_ids {
+            self.close_renderer_tab(tab_id);
         }
-
-        self.tabs.clear();
         self.active_tab = None;
+    }
+
+    pub fn shutdown_complete(&mut self) -> bool {
+        self.closing_tabs.retain(|tab| !tab.browser.borrow().closed);
+        if self.tabs.is_empty() && self.closing_tabs.is_empty() {
+            self.request_contexts.clear();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn tick(&mut self) {
@@ -575,16 +575,26 @@ impl CefRenderer {
         self.events.take_page_title_updates()
     }
 
-    pub fn sync_tabs(&mut self, tab_ids: impl IntoIterator<Item = TabId>) {
-        let live_tabs = tab_ids.into_iter().collect::<HashSet<_>>();
+    pub fn sync_tabs(&mut self, tabs: impl IntoIterator<Item = OpenTab>) {
+        let tabs = tabs.into_iter().collect::<Vec<_>>();
+        let live_tabs = tabs.iter().map(|tab| tab.tab_id).collect::<HashSet<_>>();
+        let owners = tabs
+            .iter()
+            .map(|tab| (tab.tab_id, tab.space_id))
+            .collect::<HashMap<_, _>>();
+        let live_spaces = tabs.iter().map(|tab| tab.space_id).collect::<HashSet<_>>();
         self.events.retain_tabs(&live_tabs);
         self.closing_tabs.retain(|tab| !tab.browser.borrow().closed);
 
         let closing_tab_ids = self
             .tabs
-            .keys()
-            .filter(|tab_id| !live_tabs.contains(tab_id))
-            .copied()
+            .iter()
+            .filter(|(tab_id, tab)| {
+                owners
+                    .get(tab_id)
+                    .is_none_or(|space_id| *space_id != tab.loaded.space_id)
+            })
+            .map(|(tab_id, _)| *tab_id)
             .collect::<Vec<_>>();
 
         for tab_id in closing_tab_ids {
@@ -593,10 +603,21 @@ impl CefRenderer {
 
         if self
             .active_tab
-            .is_some_and(|tab_id| !live_tabs.contains(&tab_id))
+            .is_some_and(|tab_id| !self.tabs.contains_key(&tab_id))
         {
             self.active_tab = None;
         }
+        self.request_contexts
+            .retain(|space_id, _| live_spaces.contains(space_id));
+    }
+
+    pub fn session_is_released(&self, space_id: SpaceId) -> bool {
+        !self
+            .tabs
+            .values()
+            .chain(self.closing_tabs.iter())
+            .any(|tab| tab.loaded.space_id == space_id)
+            && !self.request_contexts.contains_key(&space_id)
     }
 
     fn close_renderer_tab(&mut self, tab_id: TabId) {
@@ -626,13 +647,16 @@ impl CefRenderer {
         let browser = Rc::new(RefCell::new(BrowserSlot::default()));
         let mut client =
             WindCefClient::new(browser.clone(), self.events.clone(), target.page.tab_id);
+        let Some(mut request_context) = self.request_context(target.page.space_id) else {
+            return false;
+        };
         let created = browser_host_create_browser(
             Some(&window_info),
             Some(&mut client),
             Some(&url),
             Some(&settings),
             None,
-            None,
+            Some(&mut request_context),
         ) == 1;
 
         if created {
@@ -642,6 +666,7 @@ impl CefRenderer {
                     browser,
                     _client: Some(client),
                     loaded: LoadedPage {
+                        space_id: target.page.space_id,
                         url: target.page.url.clone(),
                         revision: target.page.render_revision,
                         session_revision: target.page.session_revision,
@@ -652,6 +677,18 @@ impl CefRenderer {
         }
 
         created
+    }
+
+    fn request_context(&mut self, space_id: SpaceId) -> Option<RequestContext> {
+        if let Some(context) = self.request_contexts.get(&space_id) {
+            return Some(context.clone());
+        }
+        let path = request_context_cache_path(&self.request_context_root, space_id);
+        std::fs::create_dir_all(&path).ok()?;
+        let settings = persistent_request_context_settings(path);
+        let context = request_context_create_context(Some(&settings), None)?;
+        self.request_contexts.insert(space_id, context.clone());
+        Some(context)
     }
 
     fn sync_browser(&mut self, tab_id: TabId, target: &PageTarget) {
@@ -678,6 +715,7 @@ impl CefRenderer {
         }
 
         tab.loaded = LoadedPage {
+            space_id: target.page.space_id,
             url: target.page.url.clone(),
             revision: target.page.render_revision,
             session_revision: target.page.session_revision,
@@ -723,6 +761,18 @@ impl CefRenderer {
 
         download_favicon(Some(&mut browser), &icon_url, request, &self.events);
     }
+}
+
+fn persistent_request_context_settings(path: PathBuf) -> RequestContextSettings {
+    RequestContextSettings {
+        cache_path: CefString::from(path.to_string_lossy().as_ref()),
+        persist_session_cookies: 1,
+        ..Default::default()
+    }
+}
+
+fn request_context_cache_path(root: &std::path::Path, space_id: SpaceId) -> PathBuf {
+    root.join(space_id.cache_key())
 }
 
 fn request_browser_close(slot: &SharedBrowser) -> Option<Browser> {
@@ -812,9 +862,6 @@ wrap_display_handler! {
                 .and_then(|urls| urls.clone().into_iter().next())
                 .filter(|url| !url.is_empty());
             let Some(icon_url) = icon_url else {
-                if let Some(request) = self.events.begin_favicon_clear_request(self.tab_id) {
-                    self.events.submit_favicon(request, None);
-                }
                 return;
             };
             let Some(request) = self.events.begin_preferred_favicon_request(self.tab_id) else {
@@ -1044,6 +1091,16 @@ fn app_shortcut(event: &KeyEvent) -> Option<AppShortcut> {
     let excluded_modifiers = cef::sys::cef_event_flags_t::EVENTFLAG_SHIFT_DOWN.0
         | cef::sys::cef_event_flags_t::EVENTFLAG_ALT_DOWN.0;
 
+    let key = u8::try_from(event.windows_key_code).ok()?;
+    let control_flag = cef::sys::cef_event_flags_t::EVENTFLAG_CONTROL_DOWN.0;
+    if is_key_down
+        && event.modifiers & control_flag != 0
+        && event.modifiers & excluded_modifiers == 0
+        && (b'1'..=b'9').contains(&key)
+    {
+        return Some(AppShortcut::SwitchSpace((key - b'1') as usize));
+    }
+
     if !is_key_down
         || event.modifiers & command_flag == 0
         || event.modifiers & excluded_modifiers != 0
@@ -1051,7 +1108,7 @@ fn app_shortcut(event: &KeyEvent) -> Option<AppShortcut> {
         return None;
     }
 
-    match u8::try_from(event.windows_key_code).ok()? {
+    match key {
         b'S' => Some(AppShortcut::ToggleSidebar),
         b'T' => Some(AppShortcut::NewTab),
         _ => None,
@@ -1089,6 +1146,18 @@ mod tests {
         };
 
         assert_eq!(app_shortcut(&event), Some(AppShortcut::NewTab));
+    }
+
+    #[test]
+    fn control_number_from_the_focused_browser_switches_space() {
+        let event = KeyEvent {
+            type_: KeyEventType::RAWKEYDOWN,
+            modifiers: cef::sys::cef_event_flags_t::EVENTFLAG_CONTROL_DOWN.0,
+            windows_key_code: i32::from(b'2'),
+            ..Default::default()
+        };
+
+        assert_eq!(app_shortcut(&event), Some(AppShortcut::SwitchSpace(1)));
     }
 
     #[test]
@@ -1203,21 +1272,6 @@ mod tests {
     }
 
     #[test]
-    fn clearing_a_reported_favicon_reaches_the_ui() {
-        let events = CefEventBridge::default();
-        let tabs = BrowserState::with_initial_url("example.com");
-        let tab_id = tabs.active_page().tab_id;
-        events.track_page(tab_id, 0);
-
-        let request = events.begin_favicon_clear_request(tab_id).unwrap();
-        events.submit_favicon(request, None);
-
-        let updates = events.take_favicon_updates();
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].favicon, None);
-    }
-
-    #[test]
     fn only_the_active_tab_is_visible_in_the_native_surface() {
         let mut tabs = BrowserState::with_initial_url("example.com");
         let first = tabs.active_page().tab_id;
@@ -1239,11 +1293,23 @@ mod tests {
     }
 
     #[test]
+    fn spaces_resolve_to_distinct_request_context_directories() {
+        let browser = BrowserState::with_default_spaces("example.com");
+        let root = std::env::temp_dir().join("wind-space-contexts");
+        let private = request_context_cache_path(&root, browser.spaces()[0].id());
+        let work = request_context_cache_path(&root, browser.spaces()[1].id());
+
+        assert!(private.starts_with(&root));
+        assert!(work.starts_with(&root));
+        assert_ne!(private, work);
+    }
+
+    #[test]
     fn closing_a_pending_tab_retains_its_cef_callbacks_until_close_finishes() {
-        let mut renderer = CefRenderer::new();
-        let tab_id = BrowserState::with_initial_url("example.com")
-            .active_page()
-            .tab_id;
+        let mut renderer = CefRenderer::new(std::env::temp_dir().join("wind-cef-test-contexts"));
+        let browser = BrowserState::with_initial_url("example.com");
+        let page = browser.active_page();
+        let tab_id = page.tab_id;
 
         renderer.tabs.insert(
             tab_id,
@@ -1251,6 +1317,7 @@ mod tests {
                 browser: Rc::new(RefCell::new(BrowserSlot::default())),
                 _client: None,
                 loaded: LoadedPage {
+                    space_id: page.space_id,
                     url: "https://example.com".to_string(),
                     revision: 0,
                     session_revision: 0,
@@ -1264,15 +1331,58 @@ mod tests {
             },
         );
 
-        renderer.sync_tabs([]);
+        assert!(!renderer.session_is_released(page.space_id));
+
+        renderer.shutdown();
 
         assert!(renderer.tabs.is_empty());
         assert_eq!(renderer.closing_tabs.len(), 1);
+        assert!(!renderer.session_is_released(page.space_id));
 
         finish_browser_close(&renderer.closing_tabs[0].browser);
-        renderer.sync_tabs([]);
+        assert!(renderer.shutdown_complete());
 
         assert!(renderer.closing_tabs.is_empty());
+        assert!(renderer.session_is_released(page.space_id));
+    }
+
+    #[test]
+    fn moving_a_live_tab_closes_its_source_space_renderer_immediately() {
+        let mut renderer = CefRenderer::new(std::env::temp_dir().join("wind-cef-move-contexts"));
+        let browser = BrowserState::with_default_spaces("example.com");
+        let source_page = browser.active_page();
+        let destination_space = browser.spaces()[1].id();
+        renderer.tabs.insert(
+            source_page.tab_id,
+            CefTab {
+                browser: Rc::new(RefCell::new(BrowserSlot::default())),
+                _client: None,
+                loaded: LoadedPage {
+                    space_id: source_page.space_id,
+                    url: source_page.url,
+                    revision: 0,
+                    session_revision: 0,
+                    bounds: PhysicalRect {
+                        x: 0,
+                        y: 0,
+                        width: 800,
+                        height: 600,
+                    },
+                },
+            },
+        );
+
+        renderer.sync_tabs([OpenTab {
+            space_id: destination_space,
+            tab_id: source_page.tab_id,
+        }]);
+
+        assert!(renderer.tabs.is_empty());
+        assert_eq!(renderer.closing_tabs.len(), 1);
+        assert_eq!(
+            renderer.closing_tabs[0].loaded.space_id,
+            source_page.space_id
+        );
     }
 }
 

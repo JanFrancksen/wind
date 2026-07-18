@@ -84,21 +84,43 @@ pub fn show_compact(
 }
 
 fn handle_shortcuts(ui: &mut egui::Ui, browser: &mut BrowserState, address_input: &mut String) {
-    let (new_tab, close_tab, reload, back, forward, reopen_closed) = ui.input(|input| {
-        let command = input.modifiers.command;
-        let shift = input.modifiers.shift;
+    let (new_tab, close_tab, reload, back, forward, reopen_closed, space_index) =
+        ui.input(|input| {
+            let command = input.modifiers.command;
+            let shift = input.modifiers.shift;
+            let number_keys = [
+                egui::Key::Num1,
+                egui::Key::Num2,
+                egui::Key::Num3,
+                egui::Key::Num4,
+                egui::Key::Num5,
+                egui::Key::Num6,
+                egui::Key::Num7,
+                egui::Key::Num8,
+                egui::Key::Num9,
+            ];
 
-        (
-            command && input.key_pressed(egui::Key::T),
-            command && input.key_pressed(egui::Key::W),
-            command && input.key_pressed(egui::Key::R),
-            command && input.key_pressed(egui::Key::ArrowLeft),
-            command && input.key_pressed(egui::Key::ArrowRight),
-            command && shift && input.key_pressed(egui::Key::T),
-        )
-    });
+            (
+                command && input.key_pressed(egui::Key::T),
+                command && input.key_pressed(egui::Key::W),
+                command && input.key_pressed(egui::Key::R),
+                command && input.key_pressed(egui::Key::ArrowLeft),
+                command && input.key_pressed(egui::Key::ArrowRight),
+                command && shift && input.key_pressed(egui::Key::T),
+                input
+                    .modifiers
+                    .ctrl
+                    .then(|| number_keys.iter().position(|key| input.key_pressed(*key)))
+                    .flatten(),
+            )
+        });
 
-    let outcome = if reopen_closed {
+    let outcome = if let Some(index) = space_index {
+        if browser.switch_space_by_index(index) {
+            *address_input = browser.active_url_for_input();
+        }
+        return;
+    } else if reopen_closed {
         let changed = browser.reopen_closed_tab().is_some();
         if changed {
             *address_input = browser.active_url_for_input();
