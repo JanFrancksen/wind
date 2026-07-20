@@ -30,6 +30,10 @@ pub fn show_root(
         match shortcut {
             AppShortcut::ToggleSidebar => *sidebar_collapsed = !*sidebar_collapsed,
             AppShortcut::NewTab => open_new_tab(browser, address_input),
+            AppShortcut::OpenUrlInNewTab(url) => {
+                browser.add_tab(&url);
+                *address_input = browser.active_url_for_input();
+            }
             AppShortcut::SwitchSpace(index) => {
                 if browser.switch_space_by_index(index) {
                     *address_input = browser.active_url_for_input();

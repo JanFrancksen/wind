@@ -879,6 +879,56 @@ fn should_show_tab(surface_visible: bool, active_tab: Option<TabId>, tab_id: Tab
     surface_visible && active_tab == Some(tab_id)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ImageContextMenuItem {
+    command_id: i32,
+    label: &'static str,
+}
+
+// Chromium command IDs from CEF 150's cef_command_ids.h. Returning false from
+// `on_context_menu_command` leaves execution to Chromium's built-in handlers.
+const fn image_context_menu_items() -> [ImageContextMenuItem; 4] {
+    [
+        ImageContextMenuItem {
+            command_id: 50_123,
+            label: "Open Image in New Tab",
+        },
+        ImageContextMenuItem {
+            command_id: 50_120,
+            label: "Save Image As...",
+        },
+        ImageContextMenuItem {
+            command_id: 50_122,
+            label: "Copy Image",
+        },
+        ImageContextMenuItem {
+            command_id: 50_121,
+            label: "Copy Image Address",
+        },
+    ]
+}
+
+fn image_context_menu_action(command_id: i32, source_url: &str) -> Option<AppShortcut> {
+    let open_image_command = image_context_menu_items()[0].command_id;
+    (command_id == open_image_command && !source_url.is_empty())
+        .then(|| AppShortcut::OpenUrlInNewTab(source_url.to_owned()))
+}
+
+fn prepend_image_context_menu(model: &MenuModel) {
+    let items = image_context_menu_items();
+    for item in items {
+        model.remove(item.command_id);
+    }
+
+    let has_other_items = model.count() > 0;
+    for (index, item) in items.into_iter().enumerate() {
+        model.insert_item_at(index, item.command_id, Some(&CefString::from(item.label)));
+    }
+    if has_other_items {
+        model.insert_separator_at(items.len());
+    }
+}
+
 wrap_app! {
     struct WindCefApp;
 
@@ -910,6 +960,51 @@ wrap_client! {
 
         fn load_handler(&self) -> Option<LoadHandler> {
             Some(WindLoadHandler::new(self.tab_id, self.events.clone()))
+        }
+
+        fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
+            Some(WindContextMenuHandler::new(self.events.clone()))
+        }
+    }
+}
+
+wrap_context_menu_handler! {
+    struct WindContextMenuHandler {
+        events: SharedEventBridge,
+    }
+
+    impl ContextMenuHandler {
+        fn on_before_context_menu(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            params: Option<&mut ContextMenuParams>,
+            model: Option<&mut MenuModel>,
+        ) {
+            if params.is_some_and(|params| params.media_type() == ContextMenuMediaType::IMAGE) {
+                if let Some(model) = model {
+                    prepend_image_context_menu(model);
+                }
+            }
+        }
+
+        fn on_context_menu_command(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            params: Option<&mut ContextMenuParams>,
+            command_id: std::os::raw::c_int,
+            _event_flags: EventFlags,
+        ) -> std::os::raw::c_int {
+            let source_url = params
+                .map(|params| CefString::from(&params.source_url()).to_string())
+                .unwrap_or_default();
+            let Some(action) = image_context_menu_action(command_id, &source_url) else {
+                return 0;
+            };
+
+            self.events.request_shortcut(action);
+            1
         }
     }
 }
@@ -1208,6 +1303,49 @@ mod tests {
     use super::*;
     use crate::browser::BrowserState;
 
+    #[test]
+    fn image_context_menu_has_requested_actions_in_order() {
+        let items = image_context_menu_items();
+
+        assert_eq!(
+            items.map(|item| item.label),
+            [
+                "Open Image in New Tab",
+                "Save Image As...",
+                "Copy Image",
+                "Copy Image Address",
+            ]
+        );
+    }
+
+    #[test]
+    fn image_context_menu_command_ids_are_unique() {
+        let items = image_context_menu_items();
+        let command_ids = items.map(|item| item.command_id);
+
+        assert_eq!(
+            command_ids.into_iter().collect::<HashSet<_>>().len(),
+            command_ids.len()
+        );
+    }
+
+    #[test]
+    fn open_image_command_routes_source_url_to_a_wind_tab() {
+        let open_image_command = image_context_menu_items()[0].command_id;
+
+        assert_eq!(
+            image_context_menu_action(open_image_command, "https://example.com/image.png"),
+            Some(AppShortcut::OpenUrlInNewTab(
+                "https://example.com/image.png".to_owned()
+            ))
+        );
+        assert_eq!(
+            image_context_menu_action(image_context_menu_items()[1].command_id, "ignored"),
+            None
+        );
+        assert_eq!(image_context_menu_action(open_image_command, ""), None);
+    }
+
     fn test_favicon(value: u8) -> Favicon {
         Favicon::from_rgba(1, 1, vec![value, value, value, 255]).unwrap()
     }
@@ -1259,7 +1397,7 @@ mod tests {
         };
 
         let shortcut = app_shortcut(&event).unwrap();
-        events.request_shortcut(shortcut);
+        events.request_shortcut(shortcut.clone());
         events.request_shortcut(shortcut);
 
         assert_eq!(

@@ -24,10 +24,11 @@ pub enum RendererStatus {
     Unavailable(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppShortcut {
     ToggleSidebar,
     NewTab,
+    OpenUrlInNewTab(String),
     SwitchSpace(usize),
 }
 
