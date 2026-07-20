@@ -872,21 +872,18 @@ fn highlighted_pinned_tabs(
             highlighted_pin_tile(&mut tile_ui, tab, is_active, rect.width(), theme);
         response.dnd_set_drag_payload(DraggedTab { id: tab.id });
 
+        let available_actions = browser.context_actions(tab.id);
         if close_clicked {
             actions.push(TabAction::new(tab.id, TabActionKind::Close));
         } else if return_clicked {
             actions.push(TabAction::new(tab.id, TabActionKind::ReturnToPinned));
-        } else if response.clicked() {
-            actions.push(TabAction::new(tab.id, TabActionKind::Select));
+        } else if let Some(kind) =
+            tab_action_for_pointer(&response, available_actions.contains(&TabActionKind::Close))
+        {
+            actions.push(TabAction::new(tab.id, kind));
         }
 
-        attach_tab_context_menu(
-            &response,
-            tab,
-            browser.context_actions(tab.id),
-            actions,
-            theme,
-        );
+        attach_tab_context_menu(&response, tab, available_actions, actions, theme);
     }
 }
 
@@ -968,7 +965,7 @@ fn highlighted_pin_tile(
         Icon::X
             .image(icon_size, color.text_muted)
             .paint_at(ui, icon_rect);
-        icon_response.clicked()
+        close_control_clicked(&icon_response)
     } else {
         false
     };
@@ -1048,6 +1045,28 @@ fn attach_tab_context_menu(
 
     #[cfg(not(target_os = "macos"))]
     response.context_menu(|ui| tab_context_menu(ui, tab, &available, _actions, _theme));
+}
+
+fn tab_action_for_pointer(response: &egui::Response, can_close: bool) -> Option<TabActionKind> {
+    if response.clicked_by(egui::PointerButton::Middle) {
+        tab_action_for_button(egui::PointerButton::Middle, can_close)
+    } else if response.clicked() {
+        tab_action_for_button(egui::PointerButton::Primary, can_close)
+    } else {
+        None
+    }
+}
+
+fn tab_action_for_button(button: egui::PointerButton, can_close: bool) -> Option<TabActionKind> {
+    match button {
+        egui::PointerButton::Middle if can_close => Some(TabActionKind::Close),
+        egui::PointerButton::Primary => Some(TabActionKind::Select),
+        _ => None,
+    }
+}
+
+fn close_control_clicked(response: &egui::Response) -> bool {
+    response.clicked() || response.clicked_by(egui::PointerButton::Middle)
 }
 
 #[derive(Clone)]
@@ -1326,8 +1345,11 @@ fn paint_tab_row_at(
             .width(tab_width)
             .show(&mut row_ui, theme);
         tab_response.dnd_set_drag_payload(DraggedTab { id: tab.id });
-        if tab_response.clicked() {
-            actions.push(TabAction::new(tab.id, TabActionKind::Select));
+        if let Some(kind) = tab_action_for_pointer(
+            &tab_response,
+            available_actions.contains(&TabActionKind::Close),
+        ) {
+            actions.push(TabAction::new(tab.id, kind));
         }
 
         attach_tab_context_menu(&tab_response, tab, available_actions, actions, theme);
@@ -1356,14 +1378,13 @@ fn paint_tab_row_at(
                     .max_rect(close_rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
-            if DsButton::icon(Icon::X)
+            let close_response = DsButton::icon(Icon::X)
                 .ghost()
                 .small()
                 .width(action_size)
                 .show(&mut close_ui, theme)
-                .on_hover_text("Close tab")
-                .clicked()
-            {
+                .on_hover_text("Close tab");
+            if close_control_clicked(&close_response) {
                 actions.push(TabAction::new(tab.id, TabActionKind::Close));
             }
         }
@@ -1619,8 +1640,32 @@ mod tests {
 
     use super::{
         grid_insertion_index, has_modal_open, normalized_favicon_image, row_insertion_index,
-        space_offsets,
+        space_offsets, tab_action_for_button,
     };
+
+    #[test]
+    fn middle_click_closes_a_closeable_tab() {
+        assert_eq!(
+            tab_action_for_button(egui::PointerButton::Middle, true),
+            Some(crate::browser::TabActionKind::Close)
+        );
+    }
+
+    #[test]
+    fn middle_click_does_not_close_an_unavailable_tab() {
+        assert_eq!(
+            tab_action_for_button(egui::PointerButton::Middle, false),
+            None
+        );
+    }
+
+    #[test]
+    fn primary_click_still_selects_a_tab() {
+        assert_eq!(
+            tab_action_for_button(egui::PointerButton::Primary, true),
+            Some(crate::browser::TabActionKind::Select)
+        );
+    }
 
     #[test]
     fn forward_space_transition_moves_old_left_and_new_in_from_right() {
