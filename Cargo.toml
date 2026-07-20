@@ -5,6 +5,7 @@ edition = "2024"
 default-run = "wind"
 
 [dependencies]
+base64 = "0.22"
 cef = { version = "150.0.0", optional = true, features = ["build-util"] }
 eframe = "0.35.0"
 egui_extras = { version = "0.35.0", features = ["svg"] }

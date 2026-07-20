@@ -60,19 +60,17 @@ impl BrowserApp {
         }
     }
 
-    fn persisted_state(&self) -> PersistedAppState {
-        PersistedAppState {
-            browser: self.browser.clone(),
-            chrome: ChromeState {
-                theme: self.theme.appearance,
-                sidebar_width: self.sidebar_width,
-                sidebar_collapsed: self.sidebar_collapsed,
-            },
+    fn chrome_state(&self) -> ChromeState {
+        ChromeState {
+            theme: self.theme.appearance,
+            sidebar_width: self.sidebar_width,
+            sidebar_collapsed: self.sidebar_collapsed,
         }
     }
 
     fn save_state(&self) -> std::io::Result<()> {
-        self.store.save(&self.persisted_state())
+        self.store
+            .save_browser_state(&self.browser, self.chrome_state())
     }
 
     fn save_if_due(&mut self, context: &egui::Context) {

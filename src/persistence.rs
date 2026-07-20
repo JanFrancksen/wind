@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    io::{self, Write},
+    fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -110,9 +109,9 @@ impl ChromeState {
 }
 
 #[derive(Serialize, Deserialize)]
-struct StateFileV2 {
+struct StateFileV2<B> {
     version: u32,
-    browser: BrowserState,
+    browser: B,
     #[serde(default)]
     chrome: ChromeState,
 }
@@ -161,7 +160,7 @@ impl AppStateStore {
                 }),
             Ok(StateVersion {
                 version: STATE_VERSION,
-            }) => serde_json::from_slice::<StateFileV2>(&bytes)
+            }) => serde_json::from_slice::<StateFileV2<BrowserState>>(&bytes)
                 .ok()
                 .map(|state| PersistedAppState {
                     browser: state.browser,
@@ -181,16 +180,23 @@ impl AppStateStore {
     }
 
     pub fn save(&self, state: &PersistedAppState) -> io::Result<()> {
+        self.save_browser_state(&state.browser, state.chrome)
+    }
+
+    pub fn save_browser_state(
+        &self,
+        browser: &BrowserState,
+        chrome: ChromeState,
+    ) -> io::Result<()> {
         self.paths.ensure()?;
         let state = StateFileV2 {
             version: STATE_VERSION,
-            browser: state.browser.clone(),
-            chrome: state.chrome,
+            browser,
+            chrome,
         };
-        let bytes = serde_json::to_vec_pretty(&state).map_err(io::Error::other)?;
         let destination = self.paths.state_file();
         let mut file = tempfile::NamedTempFile::new_in(&self.paths.data_dir)?;
-        file.write_all(&bytes)?;
+        serde_json::to_writer_pretty(&mut file, &state).map_err(io::Error::other)?;
         file.as_file().sync_all()?;
         file.persist(destination)
             .map(|_| ())
@@ -223,7 +229,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{AppPaths, AppStateStore, ChromeState, PersistedAppState};
-    use crate::browser::{BrowserState, SpaceColor, TabAction, TabActionKind, TabGroup};
+    use crate::browser::{BrowserState, Favicon, SpaceColor, TabAction, TabActionKind, TabGroup};
     use crate::ds::theming::ThemeAppearance;
 
     #[test]
@@ -294,6 +300,101 @@ mod tests {
         assert!(restored.browser.switch_space(private));
         assert!(restored.browser.reopen_closed_tab().is_some());
         assert_eq!(restored.browser.active_tab().url, "https://closed.example");
+    }
+
+    #[test]
+    fn pinned_tab_favicon_is_available_after_a_restart() {
+        let directory = tempdir().unwrap();
+        let store = AppStateStore::new(AppPaths::from_data_dir(directory.path().to_owned()));
+        let mut browser = BrowserState::with_initial_url("pinned.example");
+        let tab_id = browser.active_tab().id;
+        let favicon = Favicon::from_rgba(1, 1, vec![10, 20, 30, 255]).unwrap();
+        browser.set_favicon(tab_id, 0, Some(favicon.clone()));
+        browser.apply_tab_action(TabAction::new(tab_id, TabActionKind::TogglePin));
+
+        store
+            .save(&PersistedAppState {
+                browser,
+                chrome: ChromeState::default(),
+            })
+            .unwrap();
+        let restored = store.load().unwrap();
+        let pinned = restored.browser.active_space().tabs().first().unwrap();
+
+        assert_eq!(pinned.group(), TabGroup::Pinned);
+        assert!(pinned.is_open());
+        assert_eq!(pinned.favicon, Some(favicon));
+    }
+
+    #[test]
+    fn today_tab_favicon_is_not_added_to_the_saved_session() {
+        let directory = tempdir().unwrap();
+        let store = AppStateStore::new(AppPaths::from_data_dir(directory.path().to_owned()));
+        let mut browser = BrowserState::with_initial_url("today.example");
+        let tab_id = browser.active_tab().id;
+        browser.set_favicon(tab_id, 0, Favicon::from_rgba(1, 1, vec![10, 20, 30, 255]));
+
+        store
+            .save(&PersistedAppState {
+                browser,
+                chrome: ChromeState::default(),
+            })
+            .unwrap();
+        let restored = store.load().unwrap();
+
+        assert_eq!(restored.browser.active_tab().group(), TabGroup::Today);
+        assert_eq!(restored.browser.active_tab().favicon, None);
+    }
+
+    #[test]
+    fn a_maximum_sized_pinned_favicon_keeps_the_snapshot_below_32_kib() {
+        let directory = tempdir().unwrap();
+        let paths = AppPaths::from_data_dir(directory.path().to_owned());
+        let store = AppStateStore::new(paths.clone());
+        let mut browser = BrowserState::with_initial_url("pinned.example");
+        let tab_id = browser.active_tab().id;
+        browser.set_favicon(
+            tab_id,
+            0,
+            Favicon::from_rgba(64, 64, vec![255; 64 * 64 * 4]),
+        );
+        browser.apply_tab_action(TabAction::new(tab_id, TabActionKind::TogglePin));
+
+        store
+            .save(&PersistedAppState {
+                browser,
+                chrome: ChromeState::default(),
+            })
+            .unwrap();
+
+        assert!(fs::metadata(paths.state_file()).unwrap().len() < 32 * 1024);
+    }
+
+    #[test]
+    fn an_invalid_saved_favicon_does_not_discard_the_browser_session() {
+        let directory = tempdir().unwrap();
+        let paths = AppPaths::from_data_dir(directory.path().to_owned());
+        let store = AppStateStore::new(paths.clone());
+        let mut browser = BrowserState::with_initial_url("pinned.example");
+        let tab_id = browser.active_tab().id;
+        browser.set_favicon(tab_id, 0, Favicon::from_rgba(1, 1, vec![0, 0, 0, 255]));
+        browser.apply_tab_action(TabAction::new(tab_id, TabActionKind::TogglePin));
+        store
+            .save(&PersistedAppState {
+                browser,
+                chrome: ChromeState::default(),
+            })
+            .unwrap();
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(paths.state_file()).unwrap()).unwrap();
+        saved["browser"]["spaces"][0]["tabs"][0]["favicon"]["rgba"] =
+            serde_json::Value::String("not base64".to_owned());
+        fs::write(paths.state_file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+
+        let restored = store.load().unwrap();
+
+        assert_eq!(restored.browser.active_tab().url, "https://pinned.example");
+        assert_eq!(restored.browser.active_tab().favicon, None);
     }
 
     #[test]

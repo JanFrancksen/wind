@@ -3,8 +3,13 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+const MAX_FAVICON_SIDE: usize = 64;
+const MAX_FAVICON_BYTES: usize = MAX_FAVICON_SIDE * MAX_FAVICON_SIDE * 4;
+const MAX_ENCODED_FAVICON_BYTES: usize = MAX_FAVICON_BYTES.div_ceil(3) * 4;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabId(Uuid);
@@ -163,7 +168,7 @@ impl AddressActionOutcome {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Tab {
     pub id: TabId,
     pub title: String,
@@ -171,14 +176,82 @@ pub struct Tab {
     pub history: Vec<String>,
     pub history_index: usize,
     state: TabState,
-    #[serde(skip)]
     pub favicon: Option<Favicon>,
-    #[serde(skip)]
     pub favicon_revision: u64,
-    #[serde(skip)]
     pub render_revision: u64,
-    #[serde(skip)]
     pub session_revision: u64,
+}
+
+#[derive(Serialize)]
+struct PersistedTabRef<'a> {
+    id: TabId,
+    title: &'a str,
+    url: &'a str,
+    history: &'a [String],
+    history_index: usize,
+    state: &'a TabState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    favicon: Option<&'a Favicon>,
+}
+
+#[derive(Deserialize)]
+struct PersistedTab {
+    id: TabId,
+    title: String,
+    url: String,
+    history: Vec<String>,
+    history_index: usize,
+    state: TabState,
+    #[serde(default)]
+    favicon: Option<PersistedFavicon>,
+}
+
+impl Serialize for Tab {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        PersistedTabRef {
+            id: self.id,
+            title: &self.title,
+            url: &self.url,
+            history: &self.history,
+            history_index: self.history_index,
+            state: &self.state,
+            favicon: if self.is_organized() {
+                self.favicon.as_ref()
+            } else {
+                None
+            },
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Tab {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let persisted = PersistedTab::deserialize(deserializer)?;
+        let favicon = if matches!(&persisted.state, TabState::Organized { .. }) {
+            persisted.favicon.and_then(PersistedFavicon::into_favicon)
+        } else {
+            None
+        };
+        Ok(Self {
+            id: persisted.id,
+            title: persisted.title,
+            url: persisted.url,
+            history: persisted.history,
+            history_index: persisted.history_index,
+            state: persisted.state,
+            favicon,
+            favicon_revision: 0,
+            render_revision: 0,
+            session_revision: 0,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -291,11 +364,18 @@ pub struct Favicon {
 
 impl Favicon {
     pub fn from_rgba(width: usize, height: usize, rgba: Vec<u8>) -> Option<Self> {
-        (width > 0 && height > 0 && rgba.len() == width * height * 4).then_some(Self {
-            width,
-            height,
-            rgba,
-        })
+        let expected_bytes = width.checked_mul(height)?.checked_mul(4)?;
+        (width > 0
+            && height > 0
+            && width <= MAX_FAVICON_SIDE
+            && height <= MAX_FAVICON_SIDE
+            && expected_bytes <= MAX_FAVICON_BYTES
+            && rgba.len() == expected_bytes)
+            .then_some(Self {
+                width,
+                height,
+                rgba,
+            })
     }
 
     pub fn size(&self) -> [usize; 2] {
@@ -304,6 +384,51 @@ impl Favicon {
 
     pub fn rgba(&self) -> &[u8] {
         &self.rgba
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedFavicon {
+    width: usize,
+    height: usize,
+    rgba: String,
+}
+
+impl PersistedFavicon {
+    fn into_favicon(self) -> Option<Favicon> {
+        if self.width > MAX_FAVICON_SIDE
+            || self.height > MAX_FAVICON_SIDE
+            || self.rgba.len() > MAX_ENCODED_FAVICON_BYTES
+        {
+            return None;
+        }
+        let rgba = BASE64_STANDARD.decode(self.rgba).ok()?;
+        Favicon::from_rgba(self.width, self.height, rgba)
+    }
+}
+
+impl Serialize for Favicon {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        PersistedFavicon {
+            width: self.width,
+            height: self.height,
+            rgba: BASE64_STANDARD.encode(&self.rgba),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Favicon {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        PersistedFavicon::deserialize(deserializer)?
+            .into_favicon()
+            .ok_or_else(|| serde::de::Error::custom("invalid or oversized favicon bitmap"))
     }
 }
 
@@ -575,21 +700,28 @@ impl Space {
         }
     }
 
-    pub fn set_favicon(&mut self, tab_id: TabId, page_revision: u64, favicon: Option<Favicon>) {
+    pub fn set_favicon(
+        &mut self,
+        tab_id: TabId,
+        page_revision: u64,
+        favicon: Option<Favicon>,
+    ) -> bool {
         let Some(favicon) = favicon else {
-            return;
+            return false;
         };
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
-            return;
+            return false;
         };
         if !tab.is_open() || tab.render_revision != page_revision {
-            return;
+            return false;
         }
 
         if tab.favicon.as_ref() != Some(&favicon) {
             tab.favicon = Some(favicon);
             tab.favicon_revision += 1;
+            return tab.is_organized();
         }
+        false
     }
 
     pub fn can_go_back(&self) -> bool {
@@ -1269,7 +1401,8 @@ impl BrowserState {
 
     pub fn set_favicon(&mut self, tab_id: TabId, page_revision: u64, favicon: Option<Favicon>) {
         if let Some(space) = self.space_containing_tab_mut(tab_id) {
-            space.set_favicon(tab_id, page_revision, favicon);
+            let persistent_favicon_changed = space.set_favicon(tab_id, page_revision, favicon);
+            self.dirty |= persistent_favicon_changed;
         }
     }
 
@@ -1841,6 +1974,30 @@ mod tests {
 
         assert_eq!(browser.active_tab().favicon, Some(favicon));
         assert_eq!(browser.active_tab().favicon_revision, 1);
+    }
+
+    #[test]
+    fn favicon_bitmaps_have_a_hard_memory_bound() {
+        assert!(
+            Favicon::from_rgba(64, 64, vec![255; 64 * 64 * 4]).is_some(),
+            "CEF's maximum requested favicon size remains supported"
+        );
+        assert!(Favicon::from_rgba(65, 64, vec![255; 65 * 64 * 4]).is_none());
+        assert!(Favicon::from_rgba(usize::MAX, 2, Vec::new()).is_none());
+    }
+
+    #[test]
+    fn only_organized_favicon_updates_schedule_state_saves() {
+        let mut browser = BrowserState::with_initial_url("today.example");
+        let today = browser.active_tab().id;
+        browser.mark_clean();
+        browser.set_favicon(today, 0, Favicon::from_rgba(1, 1, vec![1, 2, 3, 255]));
+        assert!(!browser.take_dirty());
+
+        browser.apply_tab_action(TabAction::new(today, TabActionKind::TogglePin));
+        browser.mark_clean();
+        browser.set_favicon(today, 0, Favicon::from_rgba(1, 1, vec![4, 5, 6, 255]));
+        assert!(browser.take_dirty());
     }
 
     #[test]
