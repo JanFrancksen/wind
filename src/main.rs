@@ -159,7 +159,9 @@ impl eframe::App for BrowserApp {
     }
 
     fn on_exit(&mut self) {
-        let shutdown = self.renderer.shutdown_and_drain(Duration::from_secs(5));
+        let shutdown = self
+            .renderer
+            .shutdown_and_drain(Duration::from_secs(5), browser_close_timeout());
         if !shutdown.session_data_flushed {
             eprintln!("Timed out flushing CEF cookie stores during shutdown");
         }
@@ -175,11 +177,25 @@ impl eframe::App for BrowserApp {
                 // closing. Keep the runtime/library loaded and let process
                 // teardown reclaim it; the persisted deletion tombstones will
                 // retry data cleanup on the next launch.
+                #[cfg(not(target_os = "macos"))]
                 eprintln!("Timed out waiting for CEF browsers to close; deferring shutdown");
                 std::mem::forget(runtime);
             }
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn browser_close_timeout() -> Duration {
+    // `on_exit` is entered from AppKit's application-will-terminate callback.
+    // CEF cannot finish its asynchronous browser-close lifecycle after that
+    // point, so request closure and let process teardown reclaim the runtime.
+    Duration::ZERO
+}
+
+#[cfg(not(target_os = "macos"))]
+fn browser_close_timeout() -> Duration {
+    Duration::from_secs(5)
 }
 
 fn main() -> eframe::Result<()> {

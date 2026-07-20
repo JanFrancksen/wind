@@ -18,13 +18,10 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target_directory="$(dirname "$app_binary")"
 bundle="$target_directory/bundle/wind.app"
 inputs_file="$bundle/Contents/Resources/.wind-cef-inputs"
-codesign_identity="${WIND_CODESIGN_IDENTITY:-}"
-if [[ -z "$codesign_identity" ]]; then
-  codesign_identity="$({
-    security find-identity -v -p codesigning 2>/dev/null || true
-  } | awk 'found == 0 && /"Apple Development:/ { print $2; found = 1 }')"
-fi
-codesign_identity="${codesign_identity:--}"
+# Ad-hoc signing is deterministic for local builds and does not become invalid
+# when a cached Apple Development certificate expires. Release-like testing can
+# still opt into a specific valid identity explicitly.
+codesign_identity="${WIND_CODESIGN_IDENTITY:--}"
 
 build_binary() {
   if [[ "$(basename "$target_directory")" == "release" ]]; then
@@ -90,4 +87,26 @@ else
   codesign --force --sign "$codesign_identity" "$bundle"
 fi
 
-exec "$bundle/Contents/MacOS/wind" "$@"
+# LaunchServices supplies the bundle metadata that Chromium uses for runtime
+# process validation. Executing Contents/MacOS/wind directly makes that dynamic
+# validation fail even when `codesign --verify` accepts the bundle on disk.
+if terminal_path="$(tty 2>/dev/null)" && [[ "$terminal_path" != "not a tty" ]]; then
+  exec open -W --stdout "$terminal_path" --stderr "$terminal_path" "$bundle" --args "$@"
+fi
+
+# LaunchServices needs concrete output paths. Preserve diagnostics for
+# non-interactive Cargo callers and replay them when the application exits.
+stdout_log="$(mktemp "${TMPDIR:-/tmp}/wind-stdout.XXXXXX")"
+stderr_log="$(mktemp "${TMPDIR:-/tmp}/wind-stderr.XXXXXX")"
+cleanup_logs() {
+  rm -f "$stdout_log" "$stderr_log"
+}
+trap cleanup_logs EXIT
+
+set +e
+open -W --stdout "$stdout_log" --stderr "$stderr_log" "$bundle" --args "$@"
+open_status=$?
+set -e
+cat "$stdout_log"
+cat "$stderr_log" >&2
+exit "$open_status"

@@ -49,11 +49,6 @@ impl<'a> SearchField<'a> {
         self
     }
 
-    pub fn enabled(mut self, enabled: bool) -> Self {
-        self.enabled = enabled;
-        self
-    }
-
     pub fn show(self, ui: &mut egui::Ui, theme: &Theme) -> egui::Response {
         let input = &theme.tokens.component.input;
         let color = &theme.tokens.semantic.color;

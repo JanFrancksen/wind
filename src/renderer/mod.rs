@@ -162,16 +162,21 @@ impl BrowserRenderer {
         }
     }
 
-    pub fn shutdown_and_drain(&mut self, timeout: Duration) -> RendererShutdownOutcome {
-        let deadline = Instant::now() + timeout;
+    pub fn shutdown_and_drain(
+        &mut self,
+        flush_timeout: Duration,
+        close_timeout: Duration,
+    ) -> RendererShutdownOutcome {
+        let flush_deadline = Instant::now() + flush_timeout;
         self.backend.flush_session_data();
-        while !self.backend.session_data_flush_complete() && Instant::now() < deadline {
-            self.backend.tick();
+        while !self.backend.session_data_flush_complete() && Instant::now() < flush_deadline {
+            self.backend.tick_during_shutdown();
             std::thread::sleep(Duration::from_millis(10));
         }
         let session_data_flushed = self.backend.session_data_flush_complete();
 
         self.backend.shutdown();
+        let close_deadline = Instant::now() + close_timeout;
         loop {
             if self.backend.shutdown_complete() {
                 return RendererShutdownOutcome {
@@ -179,13 +184,13 @@ impl BrowserRenderer {
                     browsers_closed: true,
                 };
             }
-            if Instant::now() >= deadline {
+            if Instant::now() >= close_deadline {
                 return RendererShutdownOutcome {
                     session_data_flushed,
                     browsers_closed: false,
                 };
             }
-            self.backend.tick();
+            self.backend.tick_during_shutdown();
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -362,6 +367,14 @@ impl RendererBackend {
             Self::Placeholder(renderer) => renderer.tick(),
             #[cfg(feature = "cef-renderer")]
             Self::Cef(renderer) => renderer.tick(),
+        }
+    }
+
+    fn tick_during_shutdown(&mut self) {
+        match self {
+            Self::Placeholder(renderer) => renderer.tick(),
+            #[cfg(feature = "cef-renderer")]
+            Self::Cef(renderer) => renderer.tick_during_shutdown(),
         }
     }
 

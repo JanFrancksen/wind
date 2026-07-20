@@ -97,7 +97,8 @@ impl CefRuntime {
         })
     }
 
-    pub fn shutdown(self) {
+    pub fn shutdown(mut self) {
+        self._message_pump.stop();
         shutdown();
     }
 }
@@ -135,19 +136,23 @@ impl CefMessagePump {
             worker: Some(worker),
         }
     }
+
+    fn stop(&mut self) {
+        self.running
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            eprintln!("CEF message pump worker panicked");
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
 impl Drop for CefMessagePump {
     fn drop(&mut self) {
-        self.running
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-
-        if let Some(worker) = self.worker.take() {
-            if worker.join().is_err() {
-                eprintln!("CEF message pump worker panicked");
-            }
-        }
+        self.stop();
     }
 }
 
@@ -210,6 +215,8 @@ impl CefMessagePump {
     fn start() -> Self {
         Self
     }
+
+    fn stop(&mut self) {}
 }
 
 impl fmt::Display for CefRuntimeError {
@@ -630,6 +637,23 @@ impl CefRenderer {
         do_message_loop_work();
     }
 
+    pub fn tick_during_shutdown(&mut self) {
+        // `BrowserApp::on_exit` runs on the main thread after eframe's event
+        // loop has stopped servicing the dispatch queue. Briefly service the
+        // native run loop so the existing message-pump callbacks can run. A
+        // direct `do_message_loop_work` call here nests CEF's macOS run loop
+        // around another queued pump and never returns.
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_foundation::{NSDate, NSRunLoop};
+
+            let limit = NSDate::dateWithTimeIntervalSinceNow(0.01);
+            NSRunLoop::currentRunLoop().runUntilDate(&limit);
+        }
+        #[cfg(not(target_os = "macos"))]
+        do_message_loop_work();
+    }
+
     pub fn set_repaint_context(&self, context: &eframe::egui::Context) {
         *self.events.repaint_context.borrow_mut() = Some(context.clone());
     }
@@ -961,7 +985,36 @@ fn prepend_image_context_menu(model: &MenuModel) {
 wrap_app! {
     struct WindCefApp;
 
-    impl App {}
+    impl App {
+        fn on_before_command_line_processing(
+            &self,
+            _process_type: Option<&CefString>,
+            _command_line: Option<&mut CommandLine>,
+        ) {
+            #[cfg(target_os = "macos")]
+            if let Some(command_line) = _command_line {
+                let switch = CefString::from("disable-features");
+                let current = command_line.switch_value(Some(&switch));
+                let current = CefString::from(&current).to_string();
+                let disabled = disable_chromium_process_requirement_metrics(&current);
+                command_line.append_switch_with_value(
+                    Some(&switch),
+                    Some(&CefString::from(disabled.as_str())),
+                );
+            }
+        }
+    }
+}
+
+fn disable_chromium_process_requirement_metrics(existing: &str) -> String {
+    const FEATURE: &str = "GatherProcessRequirementMetrics";
+    if existing.split(',').any(|feature| feature == FEATURE) {
+        existing.to_owned()
+    } else if existing.is_empty() {
+        FEATURE.to_owned()
+    } else {
+        format!("{existing},{FEATURE}")
+    }
 }
 
 wrap_client! {
@@ -1412,6 +1465,22 @@ fn app_shortcut(event: &KeyEvent) -> Option<AppShortcut> {
 mod tests {
     use super::*;
     use crate::browser::BrowserState;
+
+    #[test]
+    fn process_requirement_metrics_are_disabled_without_losing_other_features() {
+        assert_eq!(
+            disable_chromium_process_requirement_metrics("FeatureA,FeatureB"),
+            "FeatureA,FeatureB,GatherProcessRequirementMetrics"
+        );
+    }
+
+    #[test]
+    fn process_requirement_metrics_disable_is_idempotent() {
+        assert_eq!(
+            disable_chromium_process_requirement_metrics("GatherProcessRequirementMetrics"),
+            "GatherProcessRequirementMetrics"
+        );
+    }
 
     #[test]
     fn image_context_menu_has_requested_actions_in_order() {
