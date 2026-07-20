@@ -29,7 +29,8 @@ mod platform {
         MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained, runtime::Sel, sel,
     };
     use objc2_app_kit::{
-        NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSMenu, NSMenuItem,
+        NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSControlStateValueOff,
+        NSControlStateValueOn, NSMenu, NSMenuItem,
     };
     use objc2_foundation::{NSObject, NSPoint, NSString};
 
@@ -49,6 +50,7 @@ mod platform {
     static OPEN_SPACE_ID: Mutex<Option<SpaceId>> = Mutex::new(None);
     static OPEN_SPACE_ACTIONS: Mutex<Vec<SpaceMenuActionKind>> = Mutex::new(Vec::new());
     static SPACE_REQUESTS: Mutex<VecDeque<SpaceMenuAction>> = Mutex::new(VecDeque::new());
+    static CONFIRMED_SPACE_DELETIONS: Mutex<VecDeque<SpaceId>> = Mutex::new(VecDeque::new());
     static REPAINT_CONTEXT: OnceLock<egui::Context> = OnceLock::new();
 
     define_class!(
@@ -522,11 +524,52 @@ mod platform {
             .collect()
     }
 
+    fn show_space_delete_confirmation_deferred(space_id: SpaceId, space_name: &str) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        // SAFETY: NSAlert uses NSObject's designated initializer.
+        let alert: Retained<NSAlert> = unsafe { msg_send![NSAlert::alloc(mtm), init] };
+        alert.setMessageText(&NSString::from_str(&format!("Delete “{space_name}”?")));
+        alert.setInformativeText(&NSString::from_str(
+            "This will delete all of its tabs, local cookies, and site data.",
+        ));
+        alert.setAlertStyle(NSAlertStyle::Warning);
+        let delete_button = alert.addButtonWithTitle(&NSString::from_str("Delete"));
+        delete_button.setHasDestructiveAction(true);
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+
+        if alert.runModal() == NSAlertFirstButtonReturn {
+            CONFIRMED_SPACE_DELETIONS
+                .lock()
+                .expect("confirmed space deletions lock poisoned")
+                .push_back(space_id);
+            if let Some(context) = REPAINT_CONTEXT.get() {
+                context.request_repaint();
+            }
+        }
+    }
+
+    pub fn show_space_delete_confirmation(space_id: SpaceId, space_name: String) {
+        dispatch::Queue::main().exec_async(move || {
+            show_space_delete_confirmation_deferred(space_id, &space_name);
+        });
+    }
+
+    pub fn take_confirmed_space_deletions() -> Vec<SpaceId> {
+        CONFIRMED_SPACE_DELETIONS
+            .lock()
+            .expect("confirmed space deletions lock poisoned")
+            .drain(..)
+            .collect()
+    }
+
     #[cfg(test)]
     mod tests {
         use super::{
-            SPACE_REQUESTS, TAB_REQUESTS, TabActionKind, menu_location_in_view, tab_action_for_tag,
-            tab_action_tag, take_space_menu_requests, take_tab_menu_requests,
+            CONFIRMED_SPACE_DELETIONS, SPACE_REQUESTS, TAB_REQUESTS, TabActionKind,
+            menu_location_in_view, tab_action_for_tag, tab_action_tag,
+            take_confirmed_space_deletions, take_space_menu_requests, take_tab_menu_requests,
         };
         use crate::{
             browser::{BrowserState, SpaceColor, TabAction},
@@ -601,6 +644,22 @@ mod platform {
         }
 
         #[test]
+        fn confirmed_native_space_deletions_are_drained_in_arrival_order() {
+            let mut browser = BrowserState::default();
+            let first = browser.active_space().id();
+            let second = browser.create_space("Second", SpaceColor::Blue);
+            let expected = vec![first, second];
+            {
+                let mut confirmations = CONFIRMED_SPACE_DELETIONS.lock().unwrap();
+                confirmations.clear();
+                confirmations.extend(expected.iter().copied());
+            }
+
+            assert_eq!(take_confirmed_space_deletions(), expected);
+            assert!(take_confirmed_space_deletions().is_empty());
+        }
+
+        #[test]
         fn native_menu_location_is_converted_for_a_flipped_content_view() {
             let window_location = NSPoint::new(240.0, 580.0);
 
@@ -664,6 +723,22 @@ pub fn take_space_menu_requests() -> Vec<SpaceMenuAction> {
     #[cfg(target_os = "macos")]
     {
         platform::take_space_menu_requests()
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
+pub fn show_space_delete_confirmation(_space_id: SpaceId, _space_name: String) {
+    #[cfg(target_os = "macos")]
+    {
+        platform::show_space_delete_confirmation(_space_id, _space_name);
+    }
+}
+
+pub fn take_confirmed_space_deletions() -> Vec<SpaceId> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::take_confirmed_space_deletions()
     }
     #[cfg(not(target_os = "macos"))]
     Vec::new()

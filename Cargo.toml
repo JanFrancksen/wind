@@ -31,8 +31,11 @@ windows-sys = { version = "0.61", optional = true, features = [
 dispatch = "0.2"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSAlert",
     "NSApplication",
+    "NSButton",
     "NSCell",
+    "NSControl",
     "NSMenu",
     "NSMenuItem",
     "NSResponder",

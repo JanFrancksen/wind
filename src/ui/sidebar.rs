@@ -327,6 +327,14 @@ fn apply_native_space_menu_requests(ui: &egui::Ui, browser: &mut BrowserState) {
                 browser.recolor_space(action.space_id, color);
             }
             native_menu::SpaceMenuActionKind::Delete => {
+                #[cfg(target_os = "macos")]
+                if let Some(space) = browser.space(action.space_id) {
+                    native_menu::show_space_delete_confirmation(
+                        action.space_id,
+                        space.name().to_owned(),
+                    );
+                }
+                #[cfg(not(target_os = "macos"))]
                 ui.ctx().data_mut(|data| {
                     data.insert_temp(egui::Id::new("space-delete-confirm"), action.space_id);
                 });
@@ -666,6 +674,32 @@ fn close_space_rename_dialog(ui: &egui::Ui, dialog_id: egui::Id, value_id: egui:
 }
 
 fn confirm_space_deletion(
+    _ui: &mut egui::Ui,
+    browser: &mut BrowserState,
+    address_input: &mut String,
+    _theme: &Theme,
+) {
+    #[cfg(target_os = "macos")]
+    for space_id in native_menu::take_confirmed_space_deletions() {
+        delete_space_and_refresh_address(browser, address_input, space_id);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    show_space_delete_confirmation_fallback(_ui, browser, address_input, _theme);
+}
+
+fn delete_space_and_refresh_address(
+    browser: &mut BrowserState,
+    address_input: &mut String,
+    space_id: SpaceId,
+) {
+    if browser.delete_space(space_id) {
+        *address_input = browser.active_url_for_input();
+    }
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn show_space_delete_confirmation_fallback(
     ui: &mut egui::Ui,
     browser: &mut BrowserState,
     address_input: &mut String,
@@ -693,8 +727,7 @@ fn confirm_space_deletion(
                     ui.ctx().data_mut(|data| data.remove::<SpaceId>(id));
                 }
                 if DsButton::new("Delete").danger().show(ui, theme).clicked() {
-                    browser.delete_space(space_id);
-                    *address_input = browser.active_url_for_input();
+                    delete_space_and_refresh_address(browser, address_input, space_id);
                     ui.ctx().data_mut(|data| data.remove::<SpaceId>(id));
                 }
             });
