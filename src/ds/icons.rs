@@ -1,12 +1,14 @@
 use eframe::egui;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub enum Icon {
     ArrowLeft,
     ArrowRight,
+    Check,
     ChevronDown,
     ChevronUp,
+    Copy,
     Pin,
     Plus,
     Reload,
@@ -24,10 +26,12 @@ impl Icon {
         match self {
             Icon::ArrowLeft => egui::include_image!("../../assets/icons/tabler/arrow-left.svg"),
             Icon::ArrowRight => egui::include_image!("../../assets/icons/tabler/arrow-right.svg"),
+            Icon::Check => egui::include_image!("../../assets/icons/tabler/check.svg"),
             Icon::ChevronDown => {
                 egui::include_image!("../../assets/icons/tabler/chevron-down.svg")
             }
             Icon::ChevronUp => egui::include_image!("../../assets/icons/tabler/chevron-up.svg"),
+            Icon::Copy => egui::include_image!("../../assets/icons/tabler/copy.svg"),
             Icon::Pin => egui::include_image!("../../assets/icons/tabler/pin.svg"),
             Icon::Plus => egui::include_image!("../../assets/icons/tabler/plus.svg"),
             Icon::Reload => egui::include_image!("../../assets/icons/tabler/reload.svg"),

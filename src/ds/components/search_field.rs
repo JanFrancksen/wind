@@ -69,13 +69,28 @@ impl<'a> SearchField<'a> {
         .max(height);
         let horizontal_chrome = (padding_x * 2.0) + (theme.tokens.primitive.stroke.hairline * 2.0);
         let editor_width = (desired_width - horizontal_chrome).max(0.0);
+        let expected_rect =
+            egui::Rect::from_min_size(ui.next_widget_position(), egui::vec2(desired_width, height));
+        let hovered = self.enabled && ui.rect_contains_pointer(expected_rect);
+        let hover = ui.ctx().animate_bool_with_time_and_easing(
+            ui.auto_id_with("search-field-hover"),
+            hovered,
+            0.14,
+            egui::emath::easing::cubic_out,
+        );
+        let fill = color
+            .surface
+            .lerp_to_gamma(color.surface_hover, hover * 0.72);
+        let border = color
+            .border
+            .lerp_to_gamma(color.text_muted.gamma_multiply(0.52), hover);
 
         let inner = ui.add_enabled_ui(self.enabled, |ui| {
             egui::Frame::new()
-                .fill(color.surface)
+                .fill(fill)
                 .stroke(egui::Stroke::new(
                     theme.tokens.primitive.stroke.hairline,
-                    color.border,
+                    border,
                 ))
                 .corner_radius(input.radius)
                 .inner_margin(egui::Margin::symmetric(padding_x as i8, 0))
@@ -95,6 +110,15 @@ impl<'a> SearchField<'a> {
         let frame = inner.inner;
         let field_rect = frame.response.rect;
         let response = frame.inner;
+
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                field_rect.shrink(theme.tokens.primitive.stroke.hairline),
+                input.radius,
+                egui::Stroke::new(theme.tokens.primitive.stroke.thin, color.focus),
+                egui::StrokeKind::Inside,
+            );
+        }
 
         if show_search_icon {
             let painter = ui.painter();

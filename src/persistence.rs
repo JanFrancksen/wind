@@ -53,7 +53,7 @@ impl AppPaths {
     }
 
     pub fn request_context_root(&self) -> PathBuf {
-        self.cef_root().join("request-contexts")
+        self.cef_root()
     }
 
     pub fn request_context_path(&self, space_id: SpaceId) -> PathBuf {
@@ -61,7 +61,26 @@ impl AppPaths {
     }
 
     pub fn ensure(&self) -> io::Result<()> {
-        fs::create_dir_all(self.request_context_root())
+        fs::create_dir_all(self.request_context_root())?;
+        self.migrate_legacy_request_contexts()
+    }
+
+    fn migrate_legacy_request_contexts(&self) -> io::Result<()> {
+        let legacy_root = self.cef_root().join("request-contexts");
+        let entries = match fs::read_dir(legacy_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+
+        for entry in entries {
+            let entry = entry?;
+            let destination = self.cef_root().join(entry.file_name());
+            if !destination.exists() {
+                fs::rename(entry.path(), destination)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -231,6 +250,37 @@ mod tests {
     use super::{AppPaths, AppStateStore, ChromeState, PersistedAppState};
     use crate::browser::{BrowserState, Favicon, SpaceColor, TabAction, TabActionKind, TabGroup};
     use crate::ds::theming::ThemeAppearance;
+
+    #[test]
+    fn space_profiles_are_direct_children_of_the_cef_root() {
+        let directory = tempdir().unwrap();
+        let paths = AppPaths::from_data_dir(directory.path().to_owned());
+        let space_id = BrowserState::default().active_space().id();
+        let profile = paths.request_context_path(space_id);
+
+        assert_eq!(profile.parent(), Some(paths.cef_root().as_path()));
+    }
+
+    #[test]
+    fn legacy_nested_space_profiles_are_moved_beside_the_cef_default_profile() {
+        let directory = tempdir().unwrap();
+        let paths = AppPaths::from_data_dir(directory.path().to_owned());
+        let space_id = BrowserState::default().active_space().id();
+        let legacy_profile = paths
+            .cef_root()
+            .join("request-contexts")
+            .join(space_id.cache_key());
+        fs::create_dir_all(&legacy_profile).unwrap();
+        fs::write(legacy_profile.join("Cookies"), b"persistent data").unwrap();
+
+        paths.ensure().unwrap();
+
+        assert_eq!(
+            fs::read(paths.request_context_path(space_id).join("Cookies")).unwrap(),
+            b"persistent data"
+        );
+        assert!(!legacy_profile.exists());
+    }
 
     #[test]
     fn browser_state_round_trips_all_spaces_and_active_tabs() {

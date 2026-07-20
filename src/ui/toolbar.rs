@@ -3,7 +3,7 @@ use eframe::egui;
 use crate::{
     browser::{BrowserState, TabAction, TabActionKind},
     ds::{
-        components::{DsButton, Icon, SearchField},
+        components::{CopyUrlButton, DsButton, Icon, SearchField},
         theming::Theme,
     },
 };
@@ -70,9 +70,17 @@ pub fn show_compact(
 
     ui.add_space(gap);
 
-    let response = SearchField::sidebar(address_input)
-        .desired_width(ui.available_width().max(control))
-        .show(ui, theme);
+    let current_url = browser.active_url_for_input();
+    let field_width = (ui.available_width() - control - gap).max(control);
+    let response = ui
+        .horizontal(|ui| {
+            let response = SearchField::sidebar(address_input)
+                .desired_width(field_width)
+                .show(ui, theme);
+            CopyUrlButton::new(&current_url).show(ui, theme);
+            response
+        })
+        .inner;
 
     let pressed_enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
     if pressed_enter {

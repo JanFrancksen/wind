@@ -119,10 +119,12 @@ impl CefMessagePump {
         };
 
         let running = Arc::new(AtomicBool::new(true));
+        let work_pending = Arc::new(AtomicBool::new(false));
         let worker_running = running.clone();
+        let worker_work_pending = work_pending.clone();
         let worker = std::thread::spawn(move || {
             while worker_running.load(Ordering::Relaxed) {
-                dispatch_cef_message_loop_work(worker_running.clone());
+                dispatch_cef_message_loop_work(worker_running.clone(), worker_work_pending.clone());
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
@@ -149,12 +151,54 @@ impl Drop for CefMessagePump {
 }
 
 #[cfg(target_os = "macos")]
-fn dispatch_cef_message_loop_work(running: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-    dispatch::Queue::main().exec_async(move || {
-        if running.load(std::sync::atomic::Ordering::Relaxed) {
-            do_message_loop_work();
-        }
+fn enqueue_cef_message_loop_work_if_idle(
+    running: &std::sync::atomic::AtomicBool,
+    work_pending: &std::sync::atomic::AtomicBool,
+    enqueue: impl FnOnce(),
+) {
+    // Native menu tracking can hold the main dispatch queue. Keep the periodic
+    // pump from building a burst of stale callbacks while the menu is open.
+    if running.load(std::sync::atomic::Ordering::Relaxed)
+        && !work_pending.swap(true, std::sync::atomic::Ordering::AcqRel)
+    {
+        enqueue();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_cef_message_loop_work(
+    running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    work_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let queued_running = running.clone();
+    let queued_work_pending = work_pending.clone();
+    enqueue_cef_message_loop_work_if_idle(&running, &work_pending, move || {
+        dispatch::Queue::main().exec_async(move || {
+            if queued_running.load(std::sync::atomic::Ordering::Relaxed) {
+                do_message_loop_work();
+            }
+            queued_work_pending.store(false, std::sync::atomic::Ordering::Release);
+        });
     });
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod cef_message_pump_tests {
+    use super::enqueue_cef_message_loop_work_if_idle;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn blocked_main_queue_does_not_accumulate_message_pump_work() {
+        let running = AtomicBool::new(true);
+        let work_pending = AtomicBool::new(false);
+        let mut queued_work = 0;
+
+        for _ in 0..100 {
+            enqueue_cef_message_loop_work_if_idle(&running, &work_pending, || queued_work += 1);
+        }
+
+        assert_eq!(queued_work, 1);
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -576,6 +620,10 @@ impl CefRenderer {
     }
 
     pub fn tick(&mut self) {
+        // macOS is pumped by `CefMessagePump` between AppKit events. Calling
+        // CEF directly from an eframe callback can dispatch a nested event and
+        // trip winit's re-entrancy guard.
+        #[cfg(not(target_os = "macos"))]
         do_message_loop_work();
     }
 

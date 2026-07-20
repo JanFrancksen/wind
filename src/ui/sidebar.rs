@@ -864,6 +864,7 @@ fn highlighted_pinned_tabs(
         };
         let mut tile_ui = ui.new_child(
             egui::UiBuilder::new()
+                .id_salt(("highlighted-tab", tab.id))
                 .max_rect(rect)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
@@ -1332,6 +1333,7 @@ fn paint_tab_row_at(
         let row_hovered = ui.rect_contains_pointer(row_rect);
         let mut row_ui = ui.new_child(
             egui::UiBuilder::new()
+                .id_salt(("tab-content", tab.id))
                 .max_rect(row_rect)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
@@ -1375,6 +1377,7 @@ fn paint_tab_row_at(
             );
             let mut close_ui = row_ui.new_child(
                 egui::UiBuilder::new()
+                    .id_salt(("close-tab", tab.id))
                     .max_rect(close_rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );

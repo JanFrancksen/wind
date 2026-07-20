@@ -1,4 +1,5 @@
 mod button;
+mod copy_url_button;
 mod divider;
 #[cfg(not(target_os = "macos"))]
 mod menu_item;
@@ -9,6 +10,7 @@ mod tab_button;
 pub use crate::ds::icons::Icon;
 #[allow(unused_imports)]
 pub use button::{ButtonSize, ButtonVariant, DsButton};
+pub use copy_url_button::CopyUrlButton;
 pub use divider::divider;
 #[cfg(not(target_os = "macos"))]
 pub use menu_item::MenuItem;

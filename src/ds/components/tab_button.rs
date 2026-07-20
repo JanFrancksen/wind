@@ -40,6 +40,25 @@ fn tab_content_layout(
     }
 }
 
+fn tab_interaction_rect(
+    rect: egui::Rect,
+    close_visible: bool,
+    spacing: f32,
+    close_size: f32,
+) -> egui::Rect {
+    if close_visible {
+        egui::Rect::from_min_max(
+            rect.min,
+            egui::pos2(
+                (rect.right() - close_size - spacing).max(rect.left()),
+                rect.bottom(),
+            ),
+        )
+    } else {
+        rect
+    }
+}
+
 pub struct TabButton<'a> {
     title: &'a str,
     favicon: Option<&'a egui::TextureHandle>,
@@ -84,24 +103,31 @@ impl<'a> TabButton<'a> {
         let tab = &theme.tokens.component.tab;
         let width = self.desired_width.unwrap_or_else(|| ui.available_width());
         let size = egui::vec2(width.max(tab.height), tab.height);
+        let space = &theme.tokens.primitive.space;
+        let close_size = tab.close_size.max(theme.tokens.component.button.height_sm);
+        let (id, rect) = ui.allocate_space(size);
+        let interaction_rect = tab_interaction_rect(rect, self.close_visible, space.xs, close_size);
+        let mut response = ui.interact(interaction_rect, id, egui::Sense::click_and_drag());
+        // Preserve the full visual/layout bounds while keeping tab clicks and
+        // drags out of the overlaid close-button hit area.
+        response.rect = rect;
         let fill = if self.selected {
             color.surface_active
+        } else if ui.rect_contains_pointer(rect) {
+            color.surface_hover
         } else {
             egui::Color32::TRANSPARENT
         };
-
-        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         let painter = ui.painter();
         painter.rect_filled(rect, tab.radius, fill);
 
-        let space = &theme.tokens.primitive.space;
         let content = tab_content_layout(
             rect,
             self.favicon.is_some(),
             self.close_visible,
             space.md,
             space.xs,
-            tab.close_size,
+            close_size,
         );
 
         if let (Some(favicon), Some(favicon_rect)) = (self.favicon, content.favicon_rect) {
@@ -137,7 +163,7 @@ impl<'a> TabButton<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FAVICON_SIZE, tab_content_layout};
+    use super::{FAVICON_SIZE, tab_content_layout, tab_interaction_rect};
 
     #[test]
     fn tab_content_starts_at_the_left_padding() {
@@ -165,5 +191,19 @@ mod tests {
         assert_eq!(hovered.favicon_rect, resting.favicon_rect);
         assert_eq!(hovered.text_pos, resting.text_pos);
         assert_eq!(resting.text_width - hovered.text_width, 28.0);
+    }
+
+    #[test]
+    fn close_button_area_is_excluded_from_tab_interaction() {
+        let rect = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(10.0, 20.0),
+            eframe::egui::vec2(200.0, 36.0),
+        );
+
+        let interaction = tab_interaction_rect(rect, true, 4.0, 28.0);
+
+        assert_eq!(interaction.left(), rect.left());
+        assert_eq!(interaction.right(), rect.right() - 32.0);
+        assert_eq!(interaction.height(), rect.height());
     }
 }
