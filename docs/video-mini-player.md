@@ -77,8 +77,10 @@ Every Active Tab change first exits the last requested PiP owner, then asks the
 previous tab to float a playing video. This also runs for Wind's native new-tab
 page and unsupported internal URLs, which bypass normal CEF page rendering.
 
-CEF focus callbacks map the native PiP “return to tab” action back to a normal
-Wind `TabAction::Select`, preserving the browser's tab model and address state.
+CEF's system focus-request callback maps the native PiP “return to tab” action
+back to a normal Wind `TabAction::Select`, preserving the browser's tab model
+and address state. Navigation-origin focus requests are ignored so background
+pages cannot select themselves.
 Wind tracks the last requested PiP owner so replacing one source explicitly
 exits it before opening another. A short deferred-dismissal window lets the
 native return action confirm its source focus without being mistaken for the

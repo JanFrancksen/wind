@@ -1015,16 +1015,36 @@ wrap_focus_handler! {
     }
 
     impl FocusHandler {
-        fn on_got_focus(&self, browser: Option<&mut Browser>) {
-            if let Some(browser) = browser {
-                floating_video::execute(
-                    FloatingVideoCommand::ConfirmReturn(self.tab_id),
-                    browser,
-                );
+        fn on_set_focus(
+            &self,
+            browser: Option<&mut Browser>,
+            source: FocusSource,
+        ) -> std::os::raw::c_int {
+            if let Some(shortcut) = focus_request_shortcut(self.tab_id, source) {
+                confirm_floating_video_return(self.tab_id, browser);
+                self.events.request_shortcut(shortcut);
             }
+            0
+        }
+
+        fn on_got_focus(&self, browser: Option<&mut Browser>) {
+            confirm_floating_video_return(self.tab_id, browser);
             self.events
                 .request_shortcut(AppShortcut::SelectTab(self.tab_id));
         }
+    }
+}
+
+fn focus_request_shortcut(tab_id: TabId, source: FocusSource) -> Option<AppShortcut> {
+    // Chromium's PiP back-to-tab control activates the source WebContents. CEF
+    // reports that as a system focus request before the embedded child view can
+    // receive focus; navigation-origin requests must not switch Wind tabs.
+    (source == FocusSource::SYSTEM).then_some(AppShortcut::SelectTab(tab_id))
+}
+
+fn confirm_floating_video_return(tab_id: TabId, browser: Option<&mut Browser>) {
+    if let Some(browser) = browser {
+        floating_video::execute(FloatingVideoCommand::ConfirmReturn(tab_id), browser);
     }
 }
 
@@ -1443,6 +1463,22 @@ mod tests {
                 OPEN_IMAGE_IN_NEW_TAB_COMMAND_ID,
                 "data:image/png;base64,AA=="
             ),
+            None
+        );
+    }
+
+    #[test]
+    fn system_focus_request_from_picture_in_picture_returns_to_its_tab() {
+        let tab_id = BrowserState::with_initial_url("youtube.com")
+            .active_page()
+            .tab_id;
+
+        assert_eq!(
+            focus_request_shortcut(tab_id, FocusSource::SYSTEM),
+            Some(AppShortcut::SelectTab(tab_id))
+        );
+        assert_eq!(
+            focus_request_shortcut(tab_id, FocusSource::NAVIGATION),
             None
         );
     }
