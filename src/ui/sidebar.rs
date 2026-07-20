@@ -168,7 +168,6 @@ fn tabs_panel(
         interactive,
     );
 
-    ui.add_space(space.sm);
     if DsButton::new("New Tab")
         .leading_icon(Icon::Plus)
         .ghost()
