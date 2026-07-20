@@ -887,31 +887,36 @@ struct ImageContextMenuItem {
 
 // Chromium command IDs from CEF 150's cef_command_ids.h. Returning false from
 // `on_context_menu_command` leaves execution to Chromium's built-in handlers.
+const SAVE_IMAGE_AS_COMMAND_ID: i32 = 50_120;
+const COPY_IMAGE_ADDRESS_COMMAND_ID: i32 = 50_121;
+const COPY_IMAGE_COMMAND_ID: i32 = 50_122;
+const OPEN_IMAGE_IN_NEW_TAB_COMMAND_ID: i32 = 50_123;
+
 const fn image_context_menu_items() -> [ImageContextMenuItem; 4] {
     [
         ImageContextMenuItem {
-            command_id: 50_123,
+            command_id: OPEN_IMAGE_IN_NEW_TAB_COMMAND_ID,
             label: "Open Image in New Tab",
         },
         ImageContextMenuItem {
-            command_id: 50_120,
+            command_id: SAVE_IMAGE_AS_COMMAND_ID,
             label: "Save Image As...",
         },
         ImageContextMenuItem {
-            command_id: 50_122,
+            command_id: COPY_IMAGE_COMMAND_ID,
             label: "Copy Image",
         },
         ImageContextMenuItem {
-            command_id: 50_121,
+            command_id: COPY_IMAGE_ADDRESS_COMMAND_ID,
             label: "Copy Image Address",
         },
     ]
 }
 
 fn image_context_menu_action(command_id: i32, source_url: &str) -> Option<AppShortcut> {
-    let open_image_command = image_context_menu_items()[0].command_id;
-    (command_id == open_image_command && !source_url.is_empty())
-        .then(|| AppShortcut::OpenUrlInNewTab(source_url.to_owned()))
+    (command_id == OPEN_IMAGE_IN_NEW_TAB_COMMAND_ID
+        && (source_url.starts_with("http://") || source_url.starts_with("https://")))
+    .then(|| AppShortcut::OpenUrlInNewTab(source_url.to_owned()))
 }
 
 fn prepend_image_context_menu(model: &MenuModel) {
@@ -965,6 +970,10 @@ wrap_client! {
         fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
             Some(WindContextMenuHandler::new(self.events.clone()))
         }
+
+        fn download_handler(&self) -> Option<DownloadHandler> {
+            Some(WindDownloadHandler::new())
+        }
     }
 }
 
@@ -1004,6 +1013,36 @@ wrap_context_menu_handler! {
             };
 
             self.events.request_shortcut(action);
+            1
+        }
+    }
+}
+
+wrap_download_handler! {
+    struct WindDownloadHandler;
+
+    impl DownloadHandler {
+        fn can_download(
+            &self,
+            _browser: Option<&mut Browser>,
+            _url: Option<&CefString>,
+            _request_method: Option<&CefString>,
+        ) -> std::os::raw::c_int {
+            1
+        }
+
+        fn on_before_download(
+            &self,
+            _browser: Option<&mut Browser>,
+            _download_item: Option<&mut DownloadItem>,
+            _suggested_name: Option<&CefString>,
+            callback: Option<&mut BeforeDownloadCallback>,
+        ) -> std::os::raw::c_int {
+            let Some(callback) = callback else {
+                return 0;
+            };
+
+            callback.cont(None, 1);
             1
         }
     }
@@ -1331,19 +1370,30 @@ mod tests {
 
     #[test]
     fn open_image_command_routes_source_url_to_a_wind_tab() {
-        let open_image_command = image_context_menu_items()[0].command_id;
-
         assert_eq!(
-            image_context_menu_action(open_image_command, "https://example.com/image.png"),
+            image_context_menu_action(
+                OPEN_IMAGE_IN_NEW_TAB_COMMAND_ID,
+                "https://example.com/image.png"
+            ),
             Some(AppShortcut::OpenUrlInNewTab(
                 "https://example.com/image.png".to_owned()
             ))
         );
         assert_eq!(
-            image_context_menu_action(image_context_menu_items()[1].command_id, "ignored"),
+            image_context_menu_action(SAVE_IMAGE_AS_COMMAND_ID, "ignored"),
             None
         );
-        assert_eq!(image_context_menu_action(open_image_command, ""), None);
+        assert_eq!(
+            image_context_menu_action(OPEN_IMAGE_IN_NEW_TAB_COMMAND_ID, ""),
+            None
+        );
+        assert_eq!(
+            image_context_menu_action(
+                OPEN_IMAGE_IN_NEW_TAB_COMMAND_ID,
+                "data:image/png;base64,AA=="
+            ),
+            None
+        );
     }
 
     fn test_favicon(value: u8) -> Favicon {

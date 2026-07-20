@@ -29,11 +29,8 @@ pub fn show_root(
     for shortcut in renderer.take_shortcut_requests() {
         match shortcut {
             AppShortcut::ToggleSidebar => *sidebar_collapsed = !*sidebar_collapsed,
-            AppShortcut::NewTab => open_new_tab(browser, address_input),
-            AppShortcut::OpenUrlInNewTab(url) => {
-                browser.add_tab(&url);
-                *address_input = browser.active_url_for_input();
-            }
+            AppShortcut::NewTab => open_new_tab(browser, address_input, "arc://new-tab"),
+            AppShortcut::OpenUrlInNewTab(url) => open_new_tab(browser, address_input, &url),
             AppShortcut::SwitchSpace(index) => {
                 if browser.switch_space_by_index(index) {
                     *address_input = browser.active_url_for_input();
@@ -96,8 +93,8 @@ pub fn show_root(
     }
 }
 
-fn open_new_tab(browser: &mut BrowserState, address_input: &mut String) {
-    browser.add_tab("arc://new-tab");
+fn open_new_tab(browser: &mut BrowserState, address_input: &mut String, url: &str) {
+    browser.add_tab(url);
     *address_input = browser.active_url_for_input();
 }
 

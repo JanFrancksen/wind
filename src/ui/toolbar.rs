@@ -135,7 +135,7 @@ fn handle_shortcuts(ui: &mut egui::Ui, browser: &mut BrowserState, address_input
         }
         return;
     } else if new_tab {
-        super::open_new_tab(browser, address_input);
+        super::open_new_tab(browser, address_input, "arc://new-tab");
         return;
     } else if close_tab {
         apply_to_active(browser, TabActionKind::Close)
