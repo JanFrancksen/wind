@@ -4,7 +4,7 @@ mod toolbar;
 use eframe::egui;
 
 use crate::{
-    browser::BrowserState,
+    browser::{BrowserState, TabAction, TabActionKind},
     ds::components::Surface,
     ds::theming::Theme,
     renderer::{AppShortcut, BrowserRenderer},
@@ -27,16 +27,7 @@ pub fn show_root(
     paint_app_backdrop(ui, full_rect, theme);
     renderer.sync_tab_metadata(browser);
     for shortcut in renderer.take_shortcut_requests() {
-        match shortcut {
-            AppShortcut::ToggleSidebar => *sidebar_collapsed = !*sidebar_collapsed,
-            AppShortcut::NewTab => open_new_tab(browser, address_input, "arc://new-tab"),
-            AppShortcut::OpenUrlInNewTab(url) => open_new_tab(browser, address_input, &url),
-            AppShortcut::SwitchSpace(index) => {
-                if browser.switch_space_by_index(index) {
-                    *address_input = browser.active_url_for_input();
-                }
-            }
-        }
+        apply_renderer_shortcut(shortcut, browser, address_input, sidebar_collapsed);
     }
     handle_sidebar_shortcut(ui, sidebar_collapsed);
 
@@ -90,6 +81,30 @@ pub fn show_root(
             resize_handle_width,
             full_rect.height(),
         );
+    }
+}
+
+fn apply_renderer_shortcut(
+    shortcut: AppShortcut,
+    browser: &mut BrowserState,
+    address_input: &mut String,
+    sidebar_collapsed: &mut bool,
+) {
+    match shortcut {
+        AppShortcut::ToggleSidebar => *sidebar_collapsed = !*sidebar_collapsed,
+        AppShortcut::NewTab => open_new_tab(browser, address_input, "arc://new-tab"),
+        AppShortcut::OpenUrlInNewTab(url) => open_new_tab(browser, address_input, &url),
+        AppShortcut::SelectTab(tab_id) => {
+            let outcome = browser.apply_tab_action(TabAction::new(tab_id, TabActionKind::Select));
+            if outcome.active_page_changed() {
+                *address_input = browser.active_url_for_input();
+            }
+        }
+        AppShortcut::SwitchSpace(index) => {
+            if browser.switch_space_by_index(index) {
+                *address_input = browser.active_url_for_input();
+            }
+        }
     }
 }
 
@@ -202,7 +217,8 @@ fn paint_app_backdrop(ui: &mut egui::Ui, rect: egui::Rect, theme: &Theme) {
 
 #[cfg(test)]
 mod tests {
-    use super::RootLayout;
+    use super::{RootLayout, apply_renderer_shortcut};
+    use crate::{browser::BrowserState, renderer::AppShortcut};
     use eframe::egui;
 
     #[test]
@@ -222,5 +238,24 @@ mod tests {
 
         assert_eq!(layout.sidebar.width(), 0.0);
         assert_eq!(layout.content, full);
+    }
+
+    #[test]
+    fn renderer_focus_can_return_to_the_floating_videos_source_tab() {
+        let mut browser = BrowserState::with_initial_url("youtube.com");
+        let source = browser.active_page().tab_id;
+        browser.add_tab("theverge.com");
+        let mut address_input = browser.active_url_for_input();
+        let mut sidebar_collapsed = false;
+
+        apply_renderer_shortcut(
+            AppShortcut::SelectTab(source),
+            &mut browser,
+            &mut address_input,
+            &mut sidebar_collapsed,
+        );
+
+        assert_eq!(browser.active_page().tab_id, source);
+        assert_eq!(address_input, "https://youtube.com");
     }
 }

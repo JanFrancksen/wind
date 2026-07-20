@@ -21,6 +21,7 @@ use crate::{
     renderer::{
         AppShortcut, FaviconUpdate, PageTarget, PageTitleUpdate, PageUrlUpdate, PhysicalRect,
         RendererStatus, favicon,
+        floating_video::{self, FloatingVideoCommand},
     },
 };
 
@@ -290,6 +291,7 @@ pub struct CefRenderer {
     tabs: HashMap<TabId, CefTab>,
     closing_tabs: Vec<CefTab>,
     active_tab: Option<TabId>,
+    floating_video_owner: Option<TabId>,
     surface_visible: bool,
     request_context_root: PathBuf,
     request_contexts: HashMap<SpaceId, RequestContext>,
@@ -515,6 +517,7 @@ impl CefRenderer {
             tabs: HashMap::new(),
             closing_tabs: Vec::new(),
             active_tab: None,
+            floating_video_owner: None,
             surface_visible: true,
             request_context_root,
             request_contexts: HashMap::new(),
@@ -533,7 +536,7 @@ impl CefRenderer {
         }) {
             self.close_renderer_tab(target.page.tab_id);
         }
-        self.set_active_tab(target.page.tab_id);
+        self.select_tab(target.page.tab_id);
 
         if !self.tabs.contains_key(&target.page.tab_id) {
             let parent = match native_window_handle(frame) {
@@ -683,6 +686,28 @@ impl CefRenderer {
             .retain(|space_id, _| live_spaces.contains(space_id));
     }
 
+    pub fn select_tab(&mut self, tab_id: TabId) {
+        let commands = floating_video::commands_for_tab_selection(
+            self.active_tab,
+            tab_id,
+            self.floating_video_owner,
+        );
+        let mut next_owner = self.floating_video_owner;
+        for command in commands {
+            if let Some(browser) = self.current_browser(command.tab_id())
+                && floating_video::execute(command, &browser)
+            {
+                next_owner = command.owner_after_success(next_owner);
+            }
+        }
+        self.floating_video_owner = next_owner;
+
+        if self.active_tab != Some(tab_id) {
+            self.active_tab = Some(tab_id);
+            self.sync_visibility();
+        }
+    }
+
     pub fn session_is_released(&self, space_id: SpaceId) -> bool {
         !self
             .tabs
@@ -697,6 +722,12 @@ impl CefRenderer {
             return;
         };
         let browser = request_browser_close(&tab.browser);
+        if let Some(browser) = browser.as_ref() {
+            floating_video::execute(FloatingVideoCommand::Exit(tab_id), browser);
+        }
+        if self.floating_video_owner == Some(tab_id) {
+            self.floating_video_owner = None;
+        }
         if let Some(host) = browser.and_then(|browser| browser.host()) {
             host.close_browser(1);
         }
@@ -793,13 +824,6 @@ impl CefRenderer {
             session_revision: target.page.session_revision,
             bounds: target.bounds,
         };
-    }
-
-    fn set_active_tab(&mut self, tab_id: TabId) {
-        if self.active_tab != Some(tab_id) {
-            self.active_tab = Some(tab_id);
-            self.sync_visibility();
-        }
     }
 
     fn sync_visibility(&self) {
@@ -956,6 +980,13 @@ wrap_client! {
             Some(WindKeyboardHandler::new(self.events.clone()))
         }
 
+        fn focus_handler(&self) -> Option<FocusHandler> {
+            Some(WindFocusHandler::new(
+                self.tab_id,
+                self.events.clone(),
+            ))
+        }
+
         fn display_handler(&self) -> Option<DisplayHandler> {
             Some(WindDisplayHandler::new(
                 self.tab_id,
@@ -973,6 +1004,26 @@ wrap_client! {
 
         fn download_handler(&self) -> Option<DownloadHandler> {
             Some(WindDownloadHandler::new())
+        }
+    }
+}
+
+wrap_focus_handler! {
+    struct WindFocusHandler {
+        tab_id: TabId,
+        events: SharedEventBridge,
+    }
+
+    impl FocusHandler {
+        fn on_got_focus(&self, browser: Option<&mut Browser>) {
+            if let Some(browser) = browser {
+                floating_video::execute(
+                    FloatingVideoCommand::ConfirmReturn(self.tab_id),
+                    browser,
+                );
+            }
+            self.events
+                .request_shortcut(AppShortcut::SelectTab(self.tab_id));
         }
     }
 }

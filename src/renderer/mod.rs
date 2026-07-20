@@ -4,6 +4,8 @@ mod placeholder;
 
 #[cfg(feature = "cef-renderer")]
 mod cef;
+#[cfg(feature = "cef-renderer")]
+mod floating_video;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -11,7 +13,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::{
-    browser::{ActivePage, BrowserState, Favicon},
+    browser::{ActivePage, BrowserState, Favicon, TabId},
     ds::theming::Theme,
 };
 
@@ -29,6 +31,7 @@ pub enum AppShortcut {
     ToggleSidebar,
     NewTab,
     OpenUrlInNewTab(String),
+    SelectTab(TabId),
     SwitchSpace(usize),
 }
 
@@ -128,6 +131,7 @@ impl BrowserRenderer {
     ) {
         self.backend.set_repaint_context(ui.ctx());
         self.backend.sync_tabs(browser.open_tabs());
+        self.backend.select_tab(browser.active_tab().id);
         let response = ui.interact(
             rect,
             egui::Id::new("wind_browser_surface"),
@@ -288,6 +292,13 @@ impl RendererBackend {
         #[cfg(feature = "cef-renderer")]
         if let Self::Cef(renderer) = self {
             renderer.sync_tabs(tab_ids);
+        }
+    }
+
+    fn select_tab(&mut self, _tab_id: crate::browser::TabId) {
+        #[cfg(feature = "cef-renderer")]
+        if let Self::Cef(renderer) = self {
+            renderer.select_tab(_tab_id);
         }
     }
 

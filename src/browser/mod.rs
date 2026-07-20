@@ -1361,6 +1361,24 @@ impl BrowserState {
                 TabActionOutcome::rejected(TabActionRejection::Unavailable)
             };
         }
+        if matches!(&action.kind, TabActionKind::Select) {
+            let target_space_id = self
+                .spaces
+                .iter()
+                .find(|space| space.tab_index(action.tab_id).is_some())
+                .map(|space| space.id);
+            if let Some(target_space_id) =
+                target_space_id.filter(|space_id| *space_id != self.active_space_id)
+            {
+                self.active_space_id = target_space_id;
+                let outcome = self.active_space_mut().apply_tab_action(action);
+                return if outcome.status == TabActionStatus::Applied {
+                    TabActionOutcome::applied(ActivePageChange::TabChanged)
+                } else {
+                    outcome
+                };
+            }
+        }
         self.active_space_mut().apply_tab_action(action)
     }
 
@@ -1763,6 +1781,21 @@ mod tests {
 
         let new_tab = browser.submit_address_input(":new rust-lang.org");
         assert_eq!(new_tab.active_page_change, ActivePageChange::TabChanged);
+    }
+
+    #[test]
+    fn selecting_a_tab_in_another_space_also_presents_its_space() {
+        let mut browser = BrowserState::with_default_spaces("youtube.com");
+        let destination_space = browser.spaces()[1].id();
+        let destination_tab = browser.spaces()[1].active_tab().id;
+
+        let outcome =
+            browser.apply_tab_action(TabAction::new(destination_tab, TabActionKind::Select));
+
+        assert_eq!(outcome.status, TabActionStatus::Applied);
+        assert_eq!(outcome.active_page_change, ActivePageChange::TabChanged);
+        assert_eq!(browser.active_space().id(), destination_space);
+        assert_eq!(browser.active_page().tab_id, destination_tab);
     }
 
     #[test]
