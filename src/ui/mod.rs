@@ -107,9 +107,19 @@ fn apply_renderer_shortcut(
             browser.add_background_tab(&url);
         }
         AppShortcut::FocusTab(tab_id) => {
-            let outcome = browser.apply_tab_action(TabAction::new(tab_id, TabActionKind::Select));
-            if outcome.active_page_changed() {
-                *address_input = browser.active_url_for_input();
+            // CEF focus notifications can arrive after a native browser has
+            // started its asynchronous close. They may focus another live tab,
+            // but must not reopen an organized tab whose session is closed.
+            let tab_is_open = browser
+                .tabs()
+                .iter()
+                .any(|tab| tab.id == tab_id && tab.is_open());
+            if tab_is_open {
+                let outcome =
+                    browser.apply_tab_action(TabAction::new(tab_id, TabActionKind::Select));
+                if outcome.active_page_changed() {
+                    *address_input = browser.active_url_for_input();
+                }
             }
         }
         AppShortcut::AddRightSplit => {
@@ -469,7 +479,10 @@ fn paint_app_backdrop(ui: &mut egui::Ui, rect: egui::Rect, theme: &Theme) {
 #[cfg(test)]
 mod tests {
     use super::{ContentLayout, RootLayout, apply_renderer_shortcut};
-    use crate::{browser::BrowserState, renderer::AppShortcut};
+    use crate::{
+        browser::{BrowserState, TabAction, TabActionKind},
+        renderer::AppShortcut,
+    };
     use eframe::egui;
 
     #[test]
@@ -542,5 +555,44 @@ mod tests {
 
         assert_eq!(browser.active_page().tab_id, source);
         assert_eq!(address_input, "https://youtube.com");
+    }
+
+    #[test]
+    fn stale_renderer_focus_does_not_reopen_a_closed_pinned_tab() {
+        let mut browser = BrowserState::with_initial_url("pinned.example");
+        let pinned = browser.active_page().tab_id;
+        browser.apply_tab_action(TabAction::new(pinned, TabActionKind::TogglePin));
+        let remaining = browser.add_tab("remaining.example");
+        let mut address_input = browser.active_url_for_input();
+        let mut sidebar_collapsed = false;
+
+        apply_renderer_shortcut(
+            AppShortcut::FocusTab(pinned),
+            &mut browser,
+            &mut address_input,
+            &mut sidebar_collapsed,
+        );
+        browser.apply_tab_action(TabAction::new(pinned, TabActionKind::Close));
+        address_input = browser.active_url_for_input();
+
+        // CEF may deliver the focus callback from the old native browser after
+        // the UI has already closed the organized tab.
+        apply_renderer_shortcut(
+            AppShortcut::FocusTab(pinned),
+            &mut browser,
+            &mut address_input,
+            &mut sidebar_collapsed,
+        );
+
+        assert_eq!(browser.active_page().tab_id, remaining);
+        assert!(
+            !browser
+                .tabs()
+                .iter()
+                .find(|tab| tab.id == pinned)
+                .unwrap()
+                .is_open()
+        );
+        assert_eq!(address_input, "https://remaining.example");
     }
 }
