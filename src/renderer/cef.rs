@@ -1487,10 +1487,41 @@ wrap_life_span_handler! {
             }
         }
 
+        fn do_close(&self, browser: Option<&mut Browser>) -> std::os::raw::c_int {
+            complete_embedded_browser_close(browser)
+        }
+
         fn on_before_close(&self, _browser: Option<&mut Browser>) {
             finish_browser_close(&self.browser);
         }
     }
+}
+
+fn complete_embedded_browser_close(browser: Option<&mut Browser>) -> std::os::raw::c_int {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let window = browser
+            .and_then(|browser| browser.host())
+            .map(|host| host.window_handle());
+        finish_embedded_browser_close(window, platform::destroy_window)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = browser;
+        // The Linux native child adapter is not implemented yet; preserve
+        // CEF's default lifecycle until that adapter can destroy its child.
+        0
+    }
+}
+
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+fn finish_embedded_browser_close<T>(child: Option<T>, destroy_child: impl FnOnce(T)) -> i32 {
+    if let Some(child) = child {
+        destroy_child(child);
+    }
+    // Wind owns one top-level window containing many CEF child views. CEF's
+    // handled result suppresses its default parent-window close notification.
+    1
 }
 
 fn popup_request_action(
@@ -2036,6 +2067,16 @@ mod tests {
     }
 
     #[test]
+    fn embedded_browser_close_destroys_only_its_child_and_suppresses_parent_close() {
+        let mut destroyed = None;
+
+        let handled = finish_embedded_browser_close(Some(42), |child| destroyed = Some(child));
+
+        assert_eq!(destroyed, Some(42));
+        assert_eq!(handled, 1);
+    }
+
+    #[test]
     fn moving_a_live_tab_closes_its_source_space_renderer_immediately() {
         let mut renderer = CefRenderer::new(std::env::temp_dir().join("wind-cef-move-contexts"));
         let browser = BrowserState::with_default_spaces("example.com");
@@ -2207,6 +2248,17 @@ mod platform {
         }
     }
 
+    #[allow(unsafe_code)]
+    pub fn destroy_window(window: cef_window_handle_t) {
+        let Some(view) = ns_view(window) else {
+            return;
+        };
+        // SAFETY: CEF documents this handle as its live NSView. Removing the
+        // child from Wind's view hierarchy completes the browser close without
+        // sending a close notification to Wind's top-level NSWindow.
+        unsafe { view.as_ref() }.removeFromSuperview();
+    }
+
     fn ns_view(window: cef_window_handle_t) -> Option<NonNull<NSView>> {
         // CEF documents cef_window_handle_t as an NSView pointer on macOS.
         NonNull::new(window.cast::<NSView>())
@@ -2275,7 +2327,7 @@ mod platform {
 mod platform {
     use cef::cef_window_handle_t;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SW_HIDE, SW_SHOW, SWP_NOZORDER, SetWindowPos, ShowWindow,
+        DestroyWindow, SW_HIDE, SW_SHOW, SWP_NOZORDER, SetWindowPos, ShowWindow,
     };
 
     use crate::renderer::PhysicalRect;
@@ -2303,6 +2355,15 @@ mod platform {
         // and visibility is changed synchronously while its host is retained.
         unsafe {
             ShowWindow(window as _, if visible { SW_SHOW } else { SW_HIDE });
+        }
+    }
+
+    #[allow(unsafe_code)]
+    pub fn destroy_window(window: cef_window_handle_t) {
+        // SAFETY: CEF documents this handle as the live child HWND. Destroying
+        // that child completes its browser close without closing Wind's parent.
+        unsafe {
+            DestroyWindow(window as _);
         }
     }
 }
