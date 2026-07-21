@@ -744,23 +744,18 @@ impl Space {
     }
 
     pub fn add_tab(&mut self, input: &str) -> TabId {
-        let id = self.next_id();
-        let url = normalize_url(input);
-
-        self.tabs.push(Tab {
-            id,
-            title: title_for_url(&url),
-            url: url.clone(),
-            history: vec![url],
-            history_index: 0,
-            state: TabState::Today,
-            favicon: None,
-            favicon_revision: 0,
-            render_revision: 0,
-            session_revision: 0,
-        });
+        let tab = self.new_tab(input);
+        let id = tab.id;
+        self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
 
+        id
+    }
+
+    pub fn add_background_tab(&mut self, input: &str) -> TabId {
+        let tab = self.new_tab(input);
+        let id = tab.id;
+        self.tabs.push(tab);
         id
     }
 
@@ -1994,6 +1989,19 @@ mod tests {
 
         apply_active(&mut browser, TabActionKind::Forward);
         assert_eq!(browser.active_tab().url, "https://rust-lang.org");
+    }
+
+    #[test]
+    fn adding_a_background_tab_preserves_the_active_tab() {
+        let mut browser = BrowserState::with_initial_url("source.example");
+        let source = browser.active_page();
+
+        let background = browser.add_background_tab("target.example");
+
+        assert_eq!(browser.active_page(), source);
+        assert_eq!(browser.tabs().len(), 2);
+        assert_eq!(browser.tabs()[1].id, background);
+        assert_eq!(browser.tabs()[1].url, "https://target.example");
     }
 
     #[test]

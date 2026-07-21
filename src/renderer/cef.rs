@@ -1072,7 +1072,10 @@ wrap_client! {
 
     impl Client {
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
-            Some(WindLifeSpanHandler::new(self.browser.clone()))
+            Some(WindLifeSpanHandler::new(
+                self.browser.clone(),
+                self.events.clone(),
+            ))
         }
 
         fn keyboard_handler(&self) -> Option<KeyboardHandler> {
@@ -1415,9 +1418,37 @@ wrap_keyboard_handler! {
 wrap_life_span_handler! {
     struct WindLifeSpanHandler {
         browser: SharedBrowser,
+        events: SharedEventBridge,
     }
 
     impl LifeSpanHandler {
+        fn on_before_popup(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _popup_id: std::os::raw::c_int,
+            target_url: Option<&CefString>,
+            _target_frame_name: Option<&CefString>,
+            target_disposition: WindowOpenDisposition,
+            user_gesture: std::os::raw::c_int,
+            _popup_features: Option<&PopupFeatures>,
+            _window_info: Option<&mut WindowInfo>,
+            _client: Option<&mut Option<Client>>,
+            _settings: Option<&mut BrowserSettings>,
+            _extra_info: Option<&mut Option<DictionaryValue>>,
+            _no_javascript_access: Option<&mut std::os::raw::c_int>,
+        ) -> std::os::raw::c_int {
+            let target_url = target_url.map(CefString::to_string).unwrap_or_default();
+            let Some(action) =
+                popup_request_action(&target_url, target_disposition, user_gesture == 1)
+            else {
+                return 0;
+            };
+
+            self.events.request_shortcut(action);
+            1
+        }
+
         fn on_after_created(&self, browser: Option<&mut Browser>) {
             let Some(browser) = browser.cloned() else {
                 return;
@@ -1440,6 +1471,31 @@ wrap_life_span_handler! {
         fn on_before_close(&self, _browser: Option<&mut Browser>) {
             finish_browser_close(&self.browser);
         }
+    }
+}
+
+fn popup_request_action(
+    target_url: &str,
+    disposition: WindowOpenDisposition,
+    user_gesture: bool,
+) -> Option<AppShortcut> {
+    let opens_window_or_tab = disposition == WindowOpenDisposition::NEW_FOREGROUND_TAB
+        || disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB
+        || disposition == WindowOpenDisposition::NEW_POPUP
+        || disposition == WindowOpenDisposition::NEW_WINDOW;
+    if !user_gesture || !opens_window_or_tab {
+        return None;
+    }
+
+    let url = match target_url {
+        "" | "about:blank" => "arc://new-tab",
+        url if url.starts_with("http://") || url.starts_with("https://") => url,
+        _ => return None,
+    };
+    if disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB {
+        Some(AppShortcut::OpenUrlInBackgroundTab(url.to_owned()))
+    } else {
+        Some(AppShortcut::OpenUrlInNewTab(url.to_owned()))
     }
 }
 
@@ -1593,6 +1649,62 @@ mod tests {
             image_context_menu_action(
                 OPEN_IMAGE_IN_NEW_TAB_COMMAND_ID,
                 "data:image/png;base64,AA=="
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn clicked_window_link_routes_to_a_wind_tab() {
+        assert_eq!(
+            popup_request_action(
+                "https://example.com/from-popup",
+                WindowOpenDisposition::NEW_WINDOW,
+                true,
+            ),
+            Some(AppShortcut::OpenUrlInNewTab(
+                "https://example.com/from-popup".to_owned()
+            ))
+        );
+        assert_eq!(
+            popup_request_action("", WindowOpenDisposition::NEW_POPUP, true),
+            Some(AppShortcut::OpenUrlInNewTab("arc://new-tab".to_owned()))
+        );
+        assert_eq!(
+            popup_request_action(
+                "https://example.com/background",
+                WindowOpenDisposition::NEW_BACKGROUND_TAB,
+                true,
+            ),
+            Some(AppShortcut::OpenUrlInBackgroundTab(
+                "https://example.com/background".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn automatic_and_non_tab_popups_are_not_routed_to_wind_tabs() {
+        assert_eq!(
+            popup_request_action(
+                "https://example.com/automatic",
+                WindowOpenDisposition::NEW_WINDOW,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            popup_request_action(
+                "https://example.com/picture-in-picture",
+                WindowOpenDisposition::NEW_PICTURE_IN_PICTURE,
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            popup_request_action(
+                "mailto:hello@example.com",
+                WindowOpenDisposition::NEW_WINDOW,
+                true,
             ),
             None
         );

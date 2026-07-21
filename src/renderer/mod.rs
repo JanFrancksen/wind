@@ -35,6 +35,7 @@ pub enum AppShortcut {
     SeparateSplit,
     FocusSplitPane(SplitPane),
     OpenUrlInNewTab(String),
+    OpenUrlInBackgroundTab(String),
     FocusTab(TabId),
     SwitchSpace(usize),
 }

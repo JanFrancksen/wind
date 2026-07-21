@@ -103,6 +103,9 @@ fn apply_renderer_shortcut(
         AppShortcut::ToggleSidebar => *sidebar_collapsed = !*sidebar_collapsed,
         AppShortcut::NewTab => open_new_tab(browser, address_input, "arc://new-tab"),
         AppShortcut::OpenUrlInNewTab(url) => open_new_tab(browser, address_input, &url),
+        AppShortcut::OpenUrlInBackgroundTab(url) => {
+            browser.add_background_tab(&url);
+        }
         AppShortcut::FocusTab(tab_id) => {
             let outcome = browser.apply_tab_action(TabAction::new(tab_id, TabActionKind::Select));
             if outcome.active_page_changed() {
