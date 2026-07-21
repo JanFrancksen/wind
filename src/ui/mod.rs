@@ -7,27 +7,43 @@ use crate::{
     browser::{BrowserState, TabAction, TabActionKind},
     ds::components::Surface,
     ds::theming::Theme,
-    renderer::{AppShortcut, BrowserRenderer},
+    renderer::{BrowserRenderer, PaneFrame},
 };
+
+#[cfg(feature = "cef-renderer")]
+use crate::renderer::AppShortcut;
+
+pub struct ChromeUi<'a> {
+    pub address_input: &'a mut String,
+    pub theme: &'a mut Theme,
+    pub sidebar_width: &'a mut f32,
+    pub sidebar_collapsed: &'a mut bool,
+}
 
 pub fn show_root(
     ui: &mut egui::Ui,
     frame: &mut eframe::Frame,
     browser: &mut BrowserState,
     renderer: &mut BrowserRenderer,
-    address_input: &mut String,
-    theme: &mut Theme,
-    sidebar_width: &mut f32,
-    sidebar_collapsed: &mut bool,
+    chrome: ChromeUi<'_>,
 ) {
+    let ChromeUi {
+        address_input,
+        theme,
+        sidebar_width,
+        sidebar_collapsed,
+    } = chrome;
     // Respect any chrome already allocated by the parent UI. This remains the
     // complete root rect today and automatically becomes the space below a
     // future top navbar.
     let full_rect = ui.available_rect_before_wrap();
     paint_app_backdrop(ui, full_rect, theme);
     renderer.sync_tab_metadata(browser);
-    for shortcut in renderer.take_shortcut_requests() {
-        apply_renderer_shortcut(shortcut, browser, address_input, sidebar_collapsed);
+    #[cfg(feature = "cef-renderer")]
+    {
+        for shortcut in renderer.take_shortcut_requests() {
+            apply_renderer_shortcut(shortcut, browser, address_input, sidebar_collapsed);
+        }
     }
     handle_sidebar_shortcut(ui, sidebar_collapsed);
 
@@ -66,33 +82,35 @@ pub fn show_root(
         theme.tokens.primitive.space.sm,
     );
     show_split_pane_headers(ui, &content_layout.headers, browser, address_input, theme);
-    renderer.show_panes(
+    let chrome_modal_open = sidebar::has_modal_open(ui.ctx());
+    renderer.show_panes(PaneFrame {
         ui,
         frame,
         browser,
         address_input,
         theme,
-        &content_layout.panes,
-        sidebar::has_modal_open(ui.ctx()),
-    );
+        pane_rects: &content_layout.panes,
+        chrome_modal_open,
+    });
     if let Some(divider) = content_layout.divider {
         split_resize_handle(ui, divider, layout.content, browser, theme);
     }
 
     if sidebar_progress > 0.98 {
+        let handle_rect = egui::Rect::from_center_size(
+            egui::pos2(layout.sidebar.right(), full_rect.center().y),
+            egui::vec2(resize_handle_width, full_rect.height()),
+        );
         invisible_sidebar_resize_handle(
             ui,
-            layout.sidebar.right(),
-            full_rect.top(),
+            handle_rect,
             sidebar_width,
-            min_sidebar_width,
-            max_sidebar_width,
-            resize_handle_width,
-            full_rect.height(),
+            min_sidebar_width..=max_sidebar_width,
         );
     }
 }
 
+#[cfg(feature = "cef-renderer")]
 fn apply_renderer_shortcut(
     shortcut: AppShortcut,
     browser: &mut BrowserState,
@@ -280,18 +298,10 @@ fn handle_sidebar_shortcut(ui: &mut egui::Ui, sidebar_collapsed: &mut bool) {
 
 fn invisible_sidebar_resize_handle(
     ui: &mut egui::Ui,
-    center_x: f32,
-    top: f32,
+    rect: egui::Rect,
     sidebar_width: &mut f32,
-    min_width: f32,
-    max_width: f32,
-    handle_width: f32,
-    height: f32,
+    width_range: std::ops::RangeInclusive<f32>,
 ) {
-    let rect = egui::Rect::from_center_size(
-        egui::pos2(center_x, top + height / 2.0),
-        egui::vec2(handle_width, height),
-    );
     let response = ui
         .interact(
             rect,
@@ -302,7 +312,7 @@ fn invisible_sidebar_resize_handle(
 
     if response.dragged() {
         let delta = ui.input(|input| input.pointer.delta().x);
-        *sidebar_width = (*sidebar_width + delta).clamp(min_width, max_width);
+        *sidebar_width = (*sidebar_width + delta).clamp(*width_range.start(), *width_range.end());
         ui.ctx().request_repaint();
     }
 }
@@ -478,7 +488,10 @@ fn paint_app_backdrop(ui: &mut egui::Ui, rect: egui::Rect, theme: &Theme) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContentLayout, RootLayout, apply_renderer_shortcut};
+    #[cfg(feature = "cef-renderer")]
+    use super::apply_renderer_shortcut;
+    use super::{ContentLayout, RootLayout};
+    #[cfg(feature = "cef-renderer")]
     use crate::{
         browser::{BrowserState, TabAction, TabActionKind},
         renderer::AppShortcut,
@@ -539,6 +552,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cef-renderer")]
     fn renderer_focus_can_return_to_the_floating_videos_source_tab() {
         let mut browser = BrowserState::with_initial_url("youtube.com");
         let source = browser.active_page().tab_id;
@@ -558,6 +572,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cef-renderer")]
     fn stale_renderer_focus_does_not_reopen_a_closed_pinned_tab() {
         let mut browser = BrowserState::with_initial_url("pinned.example");
         let pinned = browser.active_page().tab_id;

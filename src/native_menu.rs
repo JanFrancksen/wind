@@ -20,7 +20,7 @@ pub struct SpaceMenuAction {
 mod platform {
     use std::collections::VecDeque;
     use std::sync::{
-        Mutex, OnceLock,
+        Mutex, MutexGuard, OnceLock,
         atomic::{AtomicU8, Ordering},
     };
 
@@ -44,14 +44,63 @@ mod platform {
     ];
 
     static THEME_REQUEST: AtomicU8 = AtomicU8::new(NO_THEME_REQUEST);
-    static OPEN_TAB_ID: Mutex<Option<crate::browser::TabId>> = Mutex::new(None);
-    static OPEN_TAB_ACTIONS: Mutex<Vec<TabActionKind>> = Mutex::new(Vec::new());
-    static TAB_REQUESTS: Mutex<VecDeque<TabAction>> = Mutex::new(VecDeque::new());
-    static OPEN_SPACE_ID: Mutex<Option<SpaceId>> = Mutex::new(None);
-    static OPEN_SPACE_ACTIONS: Mutex<Vec<SpaceMenuActionKind>> = Mutex::new(Vec::new());
-    static SPACE_REQUESTS: Mutex<VecDeque<SpaceMenuAction>> = Mutex::new(VecDeque::new());
-    static CONFIRMED_SPACE_DELETIONS: Mutex<VecDeque<SpaceId>> = Mutex::new(VecDeque::new());
+    static TAB_MENU_STATE: Mutex<TabMenuState> = Mutex::new(TabMenuState::new());
+    static SPACE_MENU_STATE: Mutex<SpaceMenuState> = Mutex::new(SpaceMenuState::new());
     static REPAINT_CONTEXT: OnceLock<egui::Context> = OnceLock::new();
+
+    #[derive(Default)]
+    struct TabMenuState {
+        open: Option<OpenTabMenu>,
+        requests: VecDeque<TabAction>,
+    }
+
+    impl TabMenuState {
+        const fn new() -> Self {
+            Self {
+                open: None,
+                requests: VecDeque::new(),
+            }
+        }
+    }
+
+    struct OpenTabMenu {
+        tab_id: crate::browser::TabId,
+        actions: Vec<TabActionKind>,
+    }
+
+    #[derive(Default)]
+    struct SpaceMenuState {
+        open: Option<OpenSpaceMenu>,
+        requests: VecDeque<SpaceMenuAction>,
+        confirmed_deletions: VecDeque<SpaceId>,
+    }
+
+    impl SpaceMenuState {
+        const fn new() -> Self {
+            Self {
+                open: None,
+                requests: VecDeque::new(),
+                confirmed_deletions: VecDeque::new(),
+            }
+        }
+    }
+
+    struct OpenSpaceMenu {
+        space_id: SpaceId,
+        actions: Vec<SpaceMenuActionKind>,
+    }
+
+    fn lock<T: Default>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+        match mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = T::default();
+                mutex.clear_poison();
+                guard
+            }
+        }
+    }
 
     define_class!(
         // SAFETY: NSObject has no subclassing requirements, and AppKit invokes
@@ -63,6 +112,7 @@ mod platform {
 
         impl MenuTarget {
             #[unsafe(method(selectTheme:))]
+            #[allow(unsafe_code)]
             fn select_theme(&self, sender: &NSMenuItem) {
                 let tag = sender.tag() as u8;
                 if appearance_for_tag(tag).is_none() {
@@ -91,21 +141,16 @@ mod platform {
 
             #[unsafe(method(selectTabAction:))]
             fn select_tab_action(&self, sender: &NSMenuItem) {
-                let Some(action) = OPEN_TAB_ACTIONS
-                    .lock()
-                    .expect("open tab actions lock poisoned")
-                    .get(sender.tag().saturating_sub(1) as usize)
-                    .cloned()
-                else {
+                let mut state = lock(&TAB_MENU_STATE);
+                let Some((tab_id, action)) = state.open.as_ref().and_then(|open| {
+                    open.actions
+                        .get(sender.tag().saturating_sub(1) as usize)
+                        .cloned()
+                        .map(|action| (open.tab_id, action))
+                }) else {
                     return;
                 };
-                let Some(tab_id) = *OPEN_TAB_ID.lock().expect("open tab menu lock poisoned") else {
-                    return;
-                };
-                TAB_REQUESTS
-                    .lock()
-                    .expect("tab menu request lock poisoned")
-                    .push_back(TabAction::new(tab_id, action));
+                state.requests.push_back(TabAction::new(tab_id, action));
                 if let Some(context) = REPAINT_CONTEXT.get() {
                     context.request_repaint();
                 }
@@ -113,21 +158,17 @@ mod platform {
 
             #[unsafe(method(selectSpaceAction:))]
             fn select_space_action(&self, sender: &NSMenuItem) {
-                let Some(kind) = OPEN_SPACE_ACTIONS
-                    .lock()
-                    .expect("open space actions lock poisoned")
-                    .get(sender.tag().saturating_sub(1) as usize)
-                    .copied()
-                else {
+                let mut state = lock(&SPACE_MENU_STATE);
+                let Some((space_id, kind)) = state.open.as_ref().and_then(|open| {
+                    open.actions
+                        .get(sender.tag().saturating_sub(1) as usize)
+                        .copied()
+                        .map(|kind| (open.space_id, kind))
+                }) else {
                     return;
                 };
-                let Some(space_id) = *OPEN_SPACE_ID.lock().expect("open space menu lock poisoned")
-                else {
-                    return;
-                };
-                SPACE_REQUESTS
-                    .lock()
-                    .expect("space menu request lock poisoned")
+                state
+                    .requests
                     .push_back(SpaceMenuAction { space_id, kind });
                 if let Some(context) = REPAINT_CONTEXT.get() {
                     context.request_repaint();
@@ -137,6 +178,7 @@ mod platform {
     );
 
     impl MenuTarget {
+        #[allow(unsafe_code)]
         fn new(mtm: MainThreadMarker) -> Retained<Self> {
             let this = Self::alloc(mtm);
             // SAFETY: This calls NSObject's designated initializer.
@@ -146,6 +188,7 @@ mod platform {
 
     /// Builds an AppKit menu item. `selector` must either be `None` or name a
     /// method implemented by the target assigned to the returned item.
+    #[allow(unsafe_code)]
     unsafe fn menu_item(
         mtm: MainThreadMarker,
         title: &str,
@@ -205,6 +248,7 @@ mod platform {
         window_location
     }
 
+    #[allow(unsafe_code)]
     fn add_tab_action(
         menu: &NSMenu,
         target: &MenuTarget,
@@ -222,6 +266,7 @@ mod platform {
         menu.addItem(&item);
     }
 
+    #[allow(unsafe_code)]
     fn add_space_action(
         menu: &NSMenu,
         target: &MenuTarget,
@@ -229,17 +274,13 @@ mod platform {
         title: &str,
         action: SpaceMenuActionKind,
         enabled: bool,
+        actions: &mut Vec<SpaceMenuActionKind>,
     ) -> Retained<NSMenuItem> {
         // SAFETY: `selectSpaceAction:` is implemented by MenuTarget with the
         // NSMenuItem sender signature expected by AppKit.
         let item = unsafe { menu_item(mtm, title, Some(sel!(selectSpaceAction:))) };
-        let tag = {
-            let mut actions = OPEN_SPACE_ACTIONS
-                .lock()
-                .expect("open space actions lock poisoned");
-            actions.push(action);
-            actions.len()
-        };
+        actions.push(action);
+        let tag = actions.len();
         item.setTag(tag as isize);
         item.setEnabled(enabled);
         // SAFETY: The target remains alive for the duration of the synchronous
@@ -276,6 +317,7 @@ mod platform {
         }
     }
 
+    #[allow(unsafe_code)]
     pub fn install(context: &egui::Context, initial_appearance: ThemeAppearance) {
         let _ = REPAINT_CONTEXT.set(context.clone());
         let Some(mtm) = MainThreadMarker::new() else {
@@ -388,9 +430,6 @@ mod platform {
         menu.setAutoenablesItems(false);
 
         let mut previous_section = None;
-        *OPEN_TAB_ACTIONS
-            .lock()
-            .expect("open tab actions lock poisoned") = actions.to_vec();
         for (tag, action) in actions.iter().enumerate() {
             let section = tab_action_section(action);
             if previous_section.is_some_and(|previous| previous != section) {
@@ -400,13 +439,12 @@ mod platform {
             previous_section = Some(section);
         }
 
-        *OPEN_TAB_ID.lock().expect("open tab menu lock poisoned") = Some(tab.id);
+        lock(&TAB_MENU_STATE).open = Some(OpenTabMenu {
+            tab_id: tab.id,
+            actions: actions.to_vec(),
+        });
         menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(&view));
-        *OPEN_TAB_ID.lock().expect("open tab menu lock poisoned") = None;
-        OPEN_TAB_ACTIONS
-            .lock()
-            .expect("open tab actions lock poisoned")
-            .clear();
+        lock(&TAB_MENU_STATE).open = None;
     }
 
     pub fn show_tab_context_menu(tab: &Tab, actions: Vec<TabActionKind>) {
@@ -415,11 +453,7 @@ mod platform {
     }
 
     pub fn take_tab_menu_requests() -> Vec<TabAction> {
-        TAB_REQUESTS
-            .lock()
-            .expect("tab menu request lock poisoned")
-            .drain(..)
-            .collect()
+        lock(&TAB_MENU_STATE).requests.drain(..).collect()
     }
 
     fn space_color_title(color: SpaceColor) -> &'static str {
@@ -433,6 +467,7 @@ mod platform {
         }
     }
 
+    #[allow(unsafe_code)]
     fn show_space_context_menu_deferred(
         space_id: SpaceId,
         current_color: SpaceColor,
@@ -458,10 +493,7 @@ mod platform {
         let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Space"));
         menu.setAutoenablesItems(false);
 
-        OPEN_SPACE_ACTIONS
-            .lock()
-            .expect("open space actions lock poisoned")
-            .clear();
+        let mut actions = Vec::new();
 
         add_space_action(
             &menu,
@@ -470,6 +502,7 @@ mod platform {
             "Rename…",
             SpaceMenuActionKind::Rename,
             true,
+            &mut actions,
         );
         menu.addItem(&NSMenuItem::separatorItem(mtm));
 
@@ -483,6 +516,7 @@ mod platform {
                 space_color_title(color),
                 SpaceMenuActionKind::Recolor(color),
                 true,
+                &mut actions,
             );
             item.setState(if color == current_color {
                 NSControlStateValueOn
@@ -503,15 +537,12 @@ mod platform {
             "Delete Space…",
             SpaceMenuActionKind::Delete,
             can_delete,
+            &mut actions,
         );
 
-        *OPEN_SPACE_ID.lock().expect("open space menu lock poisoned") = Some(space_id);
+        lock(&SPACE_MENU_STATE).open = Some(OpenSpaceMenu { space_id, actions });
         menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(&view));
-        *OPEN_SPACE_ID.lock().expect("open space menu lock poisoned") = None;
-        OPEN_SPACE_ACTIONS
-            .lock()
-            .expect("open space actions lock poisoned")
-            .clear();
+        lock(&SPACE_MENU_STATE).open = None;
     }
 
     pub fn show_space_context_menu(space_id: SpaceId, current_color: SpaceColor, can_delete: bool) {
@@ -521,13 +552,10 @@ mod platform {
     }
 
     pub fn take_space_menu_requests() -> Vec<SpaceMenuAction> {
-        SPACE_REQUESTS
-            .lock()
-            .expect("space menu request lock poisoned")
-            .drain(..)
-            .collect()
+        lock(&SPACE_MENU_STATE).requests.drain(..).collect()
     }
 
+    #[allow(unsafe_code)]
     fn show_space_delete_confirmation_deferred(space_id: SpaceId, space_name: &str) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -544,9 +572,8 @@ mod platform {
         alert.addButtonWithTitle(&NSString::from_str("Cancel"));
 
         if alert.runModal() == NSAlertFirstButtonReturn {
-            CONFIRMED_SPACE_DELETIONS
-                .lock()
-                .expect("confirmed space deletions lock poisoned")
+            lock(&SPACE_MENU_STATE)
+                .confirmed_deletions
                 .push_back(space_id);
             if let Some(context) = REPAINT_CONTEXT.get() {
                 context.request_repaint();
@@ -561,9 +588,8 @@ mod platform {
     }
 
     pub fn take_confirmed_space_deletions() -> Vec<SpaceId> {
-        CONFIRMED_SPACE_DELETIONS
-            .lock()
-            .expect("confirmed space deletions lock poisoned")
+        lock(&SPACE_MENU_STATE)
+            .confirmed_deletions
             .drain(..)
             .collect()
     }
@@ -571,15 +597,29 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::{
-            CONFIRMED_SPACE_DELETIONS, SPACE_REQUESTS, TAB_REQUESTS, TabActionKind,
-            menu_location_in_view, tab_action_for_tag, tab_action_tag,
-            take_confirmed_space_deletions, take_space_menu_requests, take_tab_menu_requests,
+            SPACE_MENU_STATE, TAB_MENU_STATE, TabActionKind, lock, menu_location_in_view,
+            tab_action_for_tag, tab_action_tag, take_confirmed_space_deletions,
+            take_space_menu_requests, take_tab_menu_requests,
         };
         use crate::{
             browser::{BrowserState, SpaceColor, TabAction},
             native_menu::{SpaceMenuAction, SpaceMenuActionKind},
         };
         use objc2_foundation::NSPoint;
+        use std::{panic::AssertUnwindSafe, sync::Mutex};
+
+        #[test]
+        fn poisoned_native_menu_state_is_recovered_without_a_second_panic() {
+            let state = Mutex::new(Vec::<u8>::new());
+            let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let _guard = state.lock().unwrap();
+                panic!("poison the test mutex");
+            }));
+
+            lock(&state).push(1);
+
+            assert_eq!(*lock(&state), vec![1]);
+        }
 
         #[test]
         fn tab_menu_action_tags_round_trip() {
@@ -612,9 +652,9 @@ mod platform {
                 TabAction::new(tab_id, TabActionKind::Close),
             ];
             {
-                let mut requests = TAB_REQUESTS.lock().unwrap();
-                requests.clear();
-                requests.extend(expected.clone());
+                let mut state = lock(&TAB_MENU_STATE);
+                state.requests.clear();
+                state.requests.extend(expected.clone());
             }
 
             assert_eq!(take_tab_menu_requests(), expected);
@@ -640,9 +680,9 @@ mod platform {
                 },
             ];
             {
-                let mut requests = SPACE_REQUESTS.lock().unwrap();
-                requests.clear();
-                requests.extend(expected.iter().copied());
+                let mut state = lock(&SPACE_MENU_STATE);
+                state.requests.clear();
+                state.requests.extend(expected.iter().copied());
             }
 
             assert_eq!(take_space_menu_requests(), expected);
@@ -656,9 +696,9 @@ mod platform {
             let second = browser.create_space("Second", SpaceColor::Blue);
             let expected = vec![first, second];
             {
-                let mut confirmations = CONFIRMED_SPACE_DELETIONS.lock().unwrap();
-                confirmations.clear();
-                confirmations.extend(expected.iter().copied());
+                let mut state = lock(&SPACE_MENU_STATE);
+                state.confirmed_deletions.clear();
+                state.confirmed_deletions.extend(expected.iter().copied());
             }
 
             assert_eq!(take_confirmed_space_deletions(), expected);

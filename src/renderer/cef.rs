@@ -26,8 +26,9 @@ use crate::{
 };
 
 pub struct CefRuntime {
-    _library: CefLibrary,
-    _message_pump: CefMessagePump,
+    library: Option<CefLibrary>,
+    message_pump: CefMessagePump,
+    shutdown_complete: bool,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -92,14 +93,31 @@ impl CefRuntime {
         }
 
         Ok(Self {
-            _library: library,
-            _message_pump: CefMessagePump::start(),
+            library: Some(library),
+            message_pump: CefMessagePump::start(),
+            shutdown_complete: false,
         })
     }
 
     pub fn shutdown(mut self) {
-        self._message_pump.stop();
+        self.message_pump.stop();
         shutdown();
+        self.shutdown_complete = true;
+    }
+}
+
+impl Drop for CefRuntime {
+    fn drop(&mut self) {
+        self.message_pump.stop();
+
+        if !self.shutdown_complete
+            && let Some(library) = self.library.take()
+        {
+            // CEF forbids unloading its framework while browser teardown or
+            // asynchronous callbacks may still be in flight. A process-exit
+            // leak is the only sound fallback after an incomplete shutdown.
+            std::mem::forget(library);
+        }
     }
 }
 
@@ -250,6 +268,7 @@ impl Drop for CefLibrary {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 fn load_cef_library() -> Result<CefLibrary, CefRuntimeError> {
     let Some(path) = cef_framework_library_path() else {
         return Err(CefRuntimeError::LibraryLoadFailed(
@@ -1163,10 +1182,10 @@ wrap_context_menu_handler! {
             params: Option<&mut ContextMenuParams>,
             model: Option<&mut MenuModel>,
         ) {
-            if params.is_some_and(|params| params.media_type() == ContextMenuMediaType::IMAGE) {
-                if let Some(model) = model {
-                    prepend_image_context_menu(model);
-                }
+            if params.is_some_and(|params| params.media_type() == ContextMenuMediaType::IMAGE)
+                && let Some(model) = model
+            {
+                prepend_image_context_menu(model);
             }
         }
 
@@ -2129,6 +2148,7 @@ mod platform {
         #[name = "WindApplication"]
         struct WindApplication;
 
+        #[allow(unsafe_code)]
         unsafe impl CrAppProtocol for WindApplication {
             #[unsafe(method(isHandlingSendEvent))]
             unsafe fn is_handling_send_event(&self) -> Bool {
@@ -2136,6 +2156,7 @@ mod platform {
             }
         }
 
+        #[allow(unsafe_code)]
         unsafe impl CrAppControlProtocol for WindApplication {
             #[unsafe(method(setHandlingSendEvent:))]
             unsafe fn set_handling_send_event(&self, handling_send_event: Bool) {
@@ -2143,9 +2164,11 @@ mod platform {
             }
         }
 
+        #[allow(unsafe_code)]
         unsafe impl CefAppProtocol for WindApplication {}
     );
 
+    #[allow(unsafe_code)]
     pub fn initialize_application() -> Result<(), CefRuntimeError> {
         let Some(_main_thread) = MainThreadMarker::new() else {
             return Err(CefRuntimeError::InitializeFailed);
@@ -2157,6 +2180,7 @@ mod platform {
         Ok(())
     }
 
+    #[allow(unsafe_code)]
     pub fn resize_window(window: cef_window_handle_t, bounds: PhysicalRect) {
         let Some(view) = ns_view(window) else {
             return;
@@ -2173,6 +2197,7 @@ mod platform {
         view.setFrame(frame);
     }
 
+    #[allow(unsafe_code)]
     pub fn set_window_visible(window: cef_window_handle_t, visible: bool) {
         if let Some(view) = ns_view(window) {
             // SAFETY: CEF owns the NSView for the lifetime of this browser host,
@@ -2255,7 +2280,10 @@ mod platform {
 
     use crate::renderer::PhysicalRect;
 
+    #[allow(unsafe_code)]
     pub fn resize_window(window: cef_window_handle_t, bounds: PhysicalRect) {
+        // SAFETY: CEF documents this handle as the live native child window.
+        // Bounds are finite i32 values derived from egui's current viewport.
         unsafe {
             SetWindowPos(
                 window as _,
@@ -2269,7 +2297,10 @@ mod platform {
         }
     }
 
+    #[allow(unsafe_code)]
     pub fn set_window_visible(window: cef_window_handle_t, visible: bool) {
+        // SAFETY: CEF documents this handle as the live native child window,
+        // and visibility is changed synchronously while its host is retained.
         unsafe {
             ShowWindow(window as _, if visible { SW_SHOW } else { SW_HIDE });
         }

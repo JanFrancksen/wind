@@ -1,7 +1,7 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use directories::ProjectDirs;
@@ -14,6 +14,77 @@ use crate::{
 
 const STATE_VERSION: u32 = 2;
 const MIN_SIDEBAR_WIDTH: f32 = 224.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveAction {
+    Idle,
+    SaveNow,
+    Wait(Duration),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SaveState {
+    Idle,
+    Debouncing(Instant),
+    Retrying {
+        started: Instant,
+        urgent_at_failure: bool,
+    },
+}
+
+#[derive(Debug)]
+pub struct SaveSchedule {
+    debounce: Duration,
+    state: SaveState,
+}
+
+impl SaveSchedule {
+    pub fn new(debounce: Duration) -> Self {
+        Self {
+            debounce,
+            state: SaveState::Idle,
+        }
+    }
+
+    pub fn next_action(&mut self, now: Instant, dirty: bool, urgent: bool) -> SaveAction {
+        if !dirty {
+            self.state = SaveState::Idle;
+            return SaveAction::Idle;
+        }
+
+        match self.state {
+            SaveState::Idle if urgent => SaveAction::SaveNow,
+            SaveState::Idle => {
+                self.state = SaveState::Debouncing(now);
+                SaveAction::Wait(self.debounce)
+            }
+            SaveState::Debouncing(_) if urgent => SaveAction::SaveNow,
+            SaveState::Retrying {
+                urgent_at_failure: false,
+                ..
+            } if urgent => SaveAction::SaveNow,
+            SaveState::Debouncing(started) | SaveState::Retrying { started, .. } => {
+                let elapsed = now.saturating_duration_since(started);
+                if elapsed >= self.debounce {
+                    SaveAction::SaveNow
+                } else {
+                    SaveAction::Wait(self.debounce - elapsed)
+                }
+            }
+        }
+    }
+
+    pub fn record_success(&mut self) {
+        self.state = SaveState::Idle;
+    }
+
+    pub fn record_failure(&mut self, now: Instant, urgent: bool) {
+        self.state = SaveState::Retrying {
+            started: now,
+            urgent_at_failure: urgent,
+        };
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AppPaths {
@@ -217,9 +288,10 @@ impl AppStateStore {
         let mut file = tempfile::NamedTempFile::new_in(&self.paths.data_dir)?;
         serde_json::to_writer_pretty(&mut file, &state).map_err(io::Error::other)?;
         file.as_file().sync_all()?;
-        file.persist(destination)
+        file.persist(&destination)
             .map(|_| ())
-            .map_err(|error| error.error)
+            .map_err(|error| error.error)?;
+        sync_parent_directory(&destination)
     }
 
     pub fn delete_session_data(&self, space_id: SpaceId) -> io::Result<()> {
@@ -230,6 +302,22 @@ impl AppStateStore {
             Err(error) => Err(error),
         }
     }
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "persisted state path has no parent directory",
+        )
+    })?;
+    fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn preserve_corrupt_state(path: &Path) -> io::Result<()> {
@@ -243,15 +331,68 @@ fn preserve_corrupt_state(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        time::{Duration, Instant},
+    };
 
     use tempfile::tempdir;
 
-    use super::{AppPaths, AppStateStore, ChromeState, PersistedAppState};
+    use super::{
+        AppPaths, AppStateStore, ChromeState, PersistedAppState, SaveAction, SaveSchedule,
+    };
     use crate::browser::{
         BrowserState, Favicon, SpaceColor, SplitPane, TabAction, TabActionKind, TabGroup,
     };
     use crate::ds::theming::ThemeAppearance;
+
+    #[test]
+    fn failed_urgent_save_retries_after_the_debounce_without_busy_looping() {
+        let debounce = Duration::from_millis(500);
+        let started = Instant::now();
+        let mut schedule = SaveSchedule::new(debounce);
+
+        assert_eq!(
+            schedule.next_action(started, true, true),
+            SaveAction::SaveNow
+        );
+        schedule.record_failure(started, true);
+        assert_eq!(
+            schedule.next_action(started + Duration::from_millis(100), true, true),
+            SaveAction::Wait(Duration::from_millis(400))
+        );
+        assert_eq!(
+            schedule.next_action(started + debounce, true, true),
+            SaveAction::SaveNow
+        );
+        schedule.record_success();
+        assert_eq!(
+            schedule.next_action(started + debounce, false, false),
+            SaveAction::Idle
+        );
+    }
+
+    #[test]
+    fn new_urgent_work_bypasses_a_nonurgent_save_retry_delay() {
+        let debounce = Duration::from_millis(500);
+        let started = Instant::now();
+        let mut schedule = SaveSchedule::new(debounce);
+
+        assert_eq!(
+            schedule.next_action(started, true, false),
+            SaveAction::Wait(debounce)
+        );
+        assert_eq!(
+            schedule.next_action(started + debounce, true, false),
+            SaveAction::SaveNow
+        );
+        schedule.record_failure(started + debounce, false);
+
+        assert_eq!(
+            schedule.next_action(started + debounce, true, true),
+            SaveAction::SaveNow
+        );
+    }
 
     #[test]
     fn space_profiles_are_direct_children_of_the_cef_root() {

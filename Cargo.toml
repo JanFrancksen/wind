@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2024"
 default-run = "wind"
 
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
+
 [dependencies]
 base64 = "0.22"
 cef = { version = "150.0.0", optional = true, features = ["build-util"] }

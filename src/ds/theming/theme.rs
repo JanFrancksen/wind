@@ -2,10 +2,13 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 
 use super::tokens::{
-    ButtonTokens, ColorPrimitives, ComponentTokens, InputTokens, MenuTokens, MotionTokens,
-    PrimitiveTokens, RadiusTokens, SemanticColors, SemanticTokens, SizeTokens, SpaceSwitcherTokens,
-    SpaceTokens, StrokeTokens, TabTokens, Tokens, TypographyTokens,
+    ButtonTokens, ColorPrimitives, ComponentTokens, InputTokens, MotionTokens, PrimitiveTokens,
+    RadiusTokens, SemanticColors, SemanticTokens, SizeTokens, SpaceSwitcherTokens, SpaceTokens,
+    StrokeTokens, TabTokens, Tokens, TypographyTokens,
 };
+
+#[cfg(not(target_os = "macos"))]
+use super::tokens::MenuTokens;
 
 #[derive(Clone)]
 pub struct Theme {
@@ -45,21 +48,18 @@ impl Theme {
             neutral_700: egui::Color32::from_rgb(61, 76, 111),
             neutral_800: egui::Color32::from_rgb(34, 48, 82),
             neutral_900: egui::Color32::from_rgb(15, 31, 64),
-            sky_50: egui::Color32::from_rgb(245, 250, 255),
             sky_100: egui::Color32::from_rgb(229, 242, 255),
-            sky_200: egui::Color32::from_rgb(199, 225, 252),
-            sky_300: egui::Color32::from_rgb(145, 195, 244),
             blue_300: egui::Color32::from_rgb(109, 170, 241),
             blue_400: egui::Color32::from_rgb(78, 150, 242),
             blue_500: egui::Color32::from_rgb(45, 115, 238),
             navy_700: egui::Color32::from_rgb(28, 51, 100),
             navy_900: egui::Color32::from_rgb(9, 24, 56),
-            mint_300: egui::Color32::from_rgb(140, 228, 205),
             green_400: egui::Color32::from_rgb(45, 161, 121),
             violet_400: egui::Color32::from_rgb(132, 109, 239),
             amber_400: egui::Color32::from_rgb(235, 164, 69),
             rose_400: egui::Color32::from_rgb(232, 102, 139),
             slate_400: egui::Color32::from_rgb(108, 127, 162),
+            #[cfg(not(target_os = "macos"))]
             red_400: egui::Color32::from_rgb(248, 105, 105),
         };
 
@@ -69,14 +69,12 @@ impl Theme {
             sm: 8.0,
             md: 12.0,
             lg: 16.0,
-            xl: 24.0,
         };
 
         let radius = RadiusTokens {
             sm: 8,
             md: 12,
             lg: 18,
-            xl: 28,
             round: 96,
         };
 
@@ -89,7 +87,6 @@ impl Theme {
             body: 13.5,
             body_strong: 14.0,
             caption: 11.5,
-            title: 17.0,
             brand: 45.0,
         };
 
@@ -97,8 +94,6 @@ impl Theme {
             control_sm: 28.0,
             control_md: 38.0,
             sidebar_width: 282.0,
-            app_padding: 20.0,
-            tile: 64.0,
         };
 
         let motion = MotionTokens {
@@ -118,6 +113,7 @@ impl Theme {
                 surface_active: egui::Color32::from_rgba_unmultiplied(224, 235, 255, 232),
                 surface_overlay: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 176),
                 chrome: egui::Color32::from_rgba_unmultiplied(239, 245, 255, 206),
+                #[cfg(not(target_os = "macos"))]
                 chrome_hover: egui::Color32::from_rgba_unmultiplied(250, 253, 255, 236),
                 tile: egui::Color32::from_rgba_unmultiplied(248, 251, 255, 232),
                 tile_hover: egui::Color32::from_rgba_unmultiplied(255, 255, 255, 248),
@@ -129,6 +125,7 @@ impl Theme {
                 focus: color.blue_400,
                 accent: color.blue_500,
                 accent_text: color.neutral_0,
+                #[cfg(not(target_os = "macos"))]
                 danger: color.red_400,
             },
         };
@@ -138,7 +135,6 @@ impl Theme {
                 height_sm: size.control_sm,
                 height_md: size.control_md,
                 min_width: 72.0,
-                padding_x: space.md,
                 radius: radius.lg,
             },
             input: InputTokens {
@@ -146,6 +142,7 @@ impl Theme {
                 padding_x: space.lg,
                 radius: radius.round,
             },
+            #[cfg(not(target_os = "macos"))]
             menu: MenuTokens {
                 width: 216.0,
                 item_height: 34.0,
@@ -202,6 +199,7 @@ impl Theme {
             surface_active: egui::Color32::from_rgba_unmultiplied(61, 90, 145, 232),
             surface_overlay: egui::Color32::from_rgba_unmultiplied(17, 31, 62, 196),
             chrome: egui::Color32::from_rgba_unmultiplied(28, 45, 82, 218),
+            #[cfg(not(target_os = "macos"))]
             chrome_hover: egui::Color32::from_rgba_unmultiplied(45, 68, 112, 236),
             tile: egui::Color32::from_rgba_unmultiplied(32, 51, 91, 234),
             tile_hover: egui::Color32::from_rgba_unmultiplied(47, 74, 121, 246),
@@ -213,6 +211,7 @@ impl Theme {
             focus: color.blue_300,
             accent: color.blue_400,
             accent_text: color.neutral_0,
+            #[cfg(not(target_os = "macos"))]
             danger: color.red_400,
         };
         theme.appearance = ThemeAppearance::Night;

@@ -57,15 +57,16 @@ impl NewTabScene {
                 ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
                 ((pointer.y - rect.top()) / rect.height()).clamp(0.0, 1.0),
             );
-            let image = render_wind_tunnel(rect.size(), elapsed, pointer);
-            if let Some(texture) = &mut self.texture {
-                texture.set(image, egui::TextureOptions::LINEAR);
-            } else {
-                self.texture = Some(ui.ctx().load_texture(
-                    "wind-tunnel-new-tab",
-                    image,
-                    egui::TextureOptions::LINEAR,
-                ));
+            if let Some(image) = render_wind_tunnel(rect.size(), elapsed, pointer) {
+                if let Some(texture) = &mut self.texture {
+                    texture.set(image, egui::TextureOptions::LINEAR);
+                } else {
+                    self.texture = Some(ui.ctx().load_texture(
+                        "wind-tunnel-new-tab",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
             }
             self.last_rendered_at = Some(Instant::now());
         }
@@ -142,12 +143,15 @@ fn paint_search(
     submitted
 }
 
-fn render_wind_tunnel(size: egui::Vec2, time: f32, pointer: egui::Pos2) -> egui::ColorImage {
+fn render_wind_tunnel(
+    size: egui::Vec2,
+    time: f32,
+    pointer: egui::Pos2,
+) -> Option<egui::ColorImage> {
     let scale = (WIND_TUNNEL_MAX_WIDTH / size.x.max(1.0)).min(1.0);
     let width = (size.x * scale).round().clamp(2.0, WIND_TUNNEL_MAX_WIDTH) as i32;
     let height = (size.y * scale).round().clamp(2.0, WIND_TUNNEL_MAX_HEIGHT) as i32;
-    let mut surface = surfaces::raster_n32_premul((width, height))
-        .expect("Skia must create a raster surface for the new-tab scene");
+    let mut surface = surfaces::raster_n32_premul((width, height))?;
     let canvas = surface.canvas();
     let bounds = Rect::from_wh(width as f32, height as f32);
 
@@ -162,7 +166,10 @@ fn render_wind_tunnel(size: egui::Vec2, time: f32, pointer: egui::Pos2) -> egui:
     );
     let mut pixels = vec![0; width as usize * height as usize * 4];
     surface.read_pixels(&info, &mut pixels, (width * 4) as usize, (0, 0));
-    egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &pixels)
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        [width as usize, height as usize],
+        &pixels,
+    ))
 }
 
 fn paint_logo_sky(canvas: &skia_safe::Canvas, bounds: Rect) {

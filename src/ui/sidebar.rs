@@ -58,8 +58,10 @@ pub fn show(
     theme: &Theme,
     sidebar_collapsed: &mut bool,
 ) -> bool {
-    #[allow(unused_mut)]
+    #[cfg(not(target_os = "macos"))]
     let mut toggle_theme = false;
+    #[cfg(target_os = "macos")]
+    let toggle_theme = false;
 
     toolbar::show_compact(ui, browser, address_input, theme, sidebar_collapsed);
 
@@ -122,7 +124,6 @@ fn show_space_tabs(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn show_tab_layer(
     ui: &mut egui::Ui,
     pane_rect: egui::Rect,
@@ -451,7 +452,6 @@ fn space_bubble(
     response
 }
 
-#[allow(clippy::too_many_arguments)]
 fn paint_energy_orb(
     painter: &egui::Painter,
     center: egui::Pos2,
@@ -717,7 +717,7 @@ fn delete_space_and_refresh_address(
     }
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg(not(target_os = "macos"))]
 fn show_space_delete_confirmation_fallback(
     ui: &mut egui::Ui,
     browser: &mut BrowserState,
@@ -1226,28 +1226,32 @@ fn tab_sections(
     tab_row_group(
         ui,
         browser,
-        TabGroup::Pinned,
-        "Pinned",
-        theme,
-        dragging,
-        drop_target,
-        actions,
-        animate_reorder,
+        TabRowGroup {
+            group: TabGroup::Pinned,
+            label: "Pinned",
+            theme,
+            dragging,
+            drop_target: &mut *drop_target,
+            actions: &mut *actions,
+            animate_reorder,
+        },
     );
     tab_row_group(
         ui,
         browser,
-        TabGroup::Today,
-        if has_pinned_tabs || dragging.is_some() {
-            "Today"
-        } else {
-            "Tabs"
+        TabRowGroup {
+            group: TabGroup::Today,
+            label: if has_pinned_tabs || dragging.is_some() {
+                "Today"
+            } else {
+                "Tabs"
+            },
+            theme,
+            dragging,
+            drop_target,
+            actions,
+            animate_reorder,
         },
-        theme,
-        dragging,
-        drop_target,
-        actions,
-        animate_reorder,
     );
 }
 
@@ -1340,18 +1344,26 @@ fn tab_insertion_index(rows: &[SidebarTabRow], row_index: usize) -> usize {
         .sum()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn tab_row_group(
-    ui: &mut egui::Ui,
-    browser: &BrowserState,
+struct TabRowGroup<'a> {
     group: TabGroup,
-    label: &str,
-    theme: &Theme,
+    label: &'a str,
+    theme: &'a Theme,
     dragging: Option<DraggedTab>,
-    drop_target: &mut Option<DropTarget>,
-    actions: &mut Vec<TabAction>,
+    drop_target: &'a mut Option<DropTarget>,
+    actions: &'a mut Vec<TabAction>,
     animate_reorder: bool,
-) {
+}
+
+fn tab_row_group(ui: &mut egui::Ui, browser: &BrowserState, row_group: TabRowGroup<'_>) {
+    let TabRowGroup {
+        group,
+        label,
+        theme,
+        dragging,
+        drop_target,
+        actions,
+        animate_reorder,
+    } = row_group;
     let mut rows = sidebar_tab_rows(browser, group, dragging);
 
     if rows.is_empty() && dragging.is_none() {

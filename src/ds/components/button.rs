@@ -6,7 +6,6 @@ use crate::ds::{icons::Icon, theming::Theme};
 pub enum ButtonVariant {
     Secondary,
     Ghost,
-    Danger,
 }
 
 #[derive(Clone, Copy)]
@@ -20,7 +19,6 @@ pub struct DsButton<'a> {
     icon: Option<Icon>,
     variant: ButtonVariant,
     size: ButtonSize,
-    selected: bool,
     desired_width: Option<f32>,
 }
 
@@ -31,7 +29,6 @@ impl<'a> DsButton<'a> {
             icon: None,
             variant: ButtonVariant::Secondary,
             size: ButtonSize::Md,
-            selected: false,
             desired_width: None,
         }
     }
@@ -42,7 +39,6 @@ impl<'a> DsButton<'a> {
             icon: Some(icon),
             variant: ButtonVariant::Secondary,
             size: ButtonSize::Md,
-            selected: false,
             desired_width: None,
         }
     }
@@ -57,11 +53,6 @@ impl<'a> DsButton<'a> {
         self
     }
 
-    pub fn danger(mut self) -> Self {
-        self.variant = ButtonVariant::Danger;
-        self
-    }
-
     pub fn small(mut self) -> Self {
         self.size = ButtonSize::Sm;
         self
@@ -69,12 +60,6 @@ impl<'a> DsButton<'a> {
 
     pub fn width(mut self, desired_width: f32) -> Self {
         self.desired_width = Some(desired_width);
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn selected(mut self, selected: bool) -> Self {
-        self.selected = selected;
         self
     }
 
@@ -89,17 +74,8 @@ impl<'a> DsButton<'a> {
         let (fill, text, border) = match self.variant {
             ButtonVariant::Secondary => (color.chrome, color.text, color.border),
             ButtonVariant::Ghost => (
-                if self.selected {
-                    color.surface_active
-                } else {
-                    egui::Color32::TRANSPARENT
-                },
+                egui::Color32::TRANSPARENT,
                 color.text,
-                egui::Color32::TRANSPARENT,
-            ),
-            ButtonVariant::Danger => (
-                egui::Color32::TRANSPARENT,
-                color.danger,
                 egui::Color32::TRANSPARENT,
             ),
         };

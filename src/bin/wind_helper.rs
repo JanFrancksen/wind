@@ -1,6 +1,14 @@
+#![deny(clippy::panic, clippy::unwrap_used)]
+
 #[cfg(all(feature = "cef-renderer", target_os = "macos"))]
 fn main() {
-    let executable_path = std::env::current_exe().expect("helper executable path");
+    let executable_path = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("failed to resolve the Wind helper executable: {error}");
+            std::process::exit(1);
+        }
+    };
     let loader = cef::library_loader::LibraryLoader::new(&executable_path, true);
 
     if !loader.load() {

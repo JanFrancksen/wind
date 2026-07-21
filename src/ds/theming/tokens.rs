@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use eframe::egui;
 
 #[derive(Clone)]
@@ -30,21 +28,18 @@ pub struct ColorPrimitives {
     pub neutral_700: egui::Color32,
     pub neutral_800: egui::Color32,
     pub neutral_900: egui::Color32,
-    pub sky_50: egui::Color32,
     pub sky_100: egui::Color32,
-    pub sky_200: egui::Color32,
-    pub sky_300: egui::Color32,
     pub blue_300: egui::Color32,
     pub blue_400: egui::Color32,
     pub blue_500: egui::Color32,
     pub navy_700: egui::Color32,
     pub navy_900: egui::Color32,
-    pub mint_300: egui::Color32,
     pub green_400: egui::Color32,
     pub violet_400: egui::Color32,
     pub amber_400: egui::Color32,
     pub rose_400: egui::Color32,
     pub slate_400: egui::Color32,
+    #[cfg(not(target_os = "macos"))]
     pub red_400: egui::Color32,
 }
 
@@ -55,7 +50,6 @@ pub struct SpaceTokens {
     pub sm: f32,
     pub md: f32,
     pub lg: f32,
-    pub xl: f32,
 }
 
 #[derive(Clone)]
@@ -63,7 +57,6 @@ pub struct RadiusTokens {
     pub sm: u8,
     pub md: u8,
     pub lg: u8,
-    pub xl: u8,
     pub round: u8,
 }
 
@@ -78,7 +71,6 @@ pub struct TypographyTokens {
     pub body: f32,
     pub body_strong: f32,
     pub caption: f32,
-    pub title: f32,
     pub brand: f32,
 }
 
@@ -87,8 +79,6 @@ pub struct SizeTokens {
     pub control_sm: f32,
     pub control_md: f32,
     pub sidebar_width: f32,
-    pub app_padding: f32,
-    pub tile: f32,
 }
 
 #[derive(Clone)]
@@ -114,6 +104,7 @@ pub struct SemanticColors {
     pub surface_active: egui::Color32,
     pub surface_overlay: egui::Color32,
     pub chrome: egui::Color32,
+    #[cfg(not(target_os = "macos"))]
     pub chrome_hover: egui::Color32,
     pub tile: egui::Color32,
     pub tile_hover: egui::Color32,
@@ -125,6 +116,7 @@ pub struct SemanticColors {
     pub focus: egui::Color32,
     pub accent: egui::Color32,
     pub accent_text: egui::Color32,
+    #[cfg(not(target_os = "macos"))]
     pub danger: egui::Color32,
 }
 
@@ -132,6 +124,7 @@ pub struct SemanticColors {
 pub struct ComponentTokens {
     pub button: ButtonTokens,
     pub input: InputTokens,
+    #[cfg(not(target_os = "macos"))]
     pub menu: MenuTokens,
     pub tab: TabTokens,
     pub space_switcher: SpaceSwitcherTokens,
@@ -142,7 +135,6 @@ pub struct ButtonTokens {
     pub height_sm: f32,
     pub height_md: f32,
     pub min_width: f32,
-    pub padding_x: f32,
     pub radius: u8,
 }
 
@@ -153,6 +145,7 @@ pub struct InputTokens {
     pub radius: u8,
 }
 
+#[cfg(not(target_os = "macos"))]
 #[derive(Clone)]
 pub struct MenuTokens {
     pub width: f32,

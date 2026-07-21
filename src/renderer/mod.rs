@@ -1,3 +1,4 @@
+#[cfg(any(feature = "cef-renderer", test))]
 mod favicon;
 mod new_tab;
 mod placeholder;
@@ -13,21 +14,25 @@ use std::{collections::HashSet, path::PathBuf};
 use eframe::egui;
 
 use crate::{
-    browser::{ActivePage, BrowserState, Favicon, SplitPane, TabId},
+    browser::{ActivePage, BrowserState, Favicon},
     ds::theming::Theme,
 };
 
-#[allow(dead_code)]
+#[cfg(feature = "cef-renderer")]
+use crate::browser::{SplitPane, TabId};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RendererStatus {
+    #[cfg(feature = "cef-renderer")]
     Ready,
+    #[cfg(feature = "cef-renderer")]
     WaitingForNativeBrowser,
     UnsupportedUrl(String),
     Unavailable(String),
 }
 
+#[cfg(feature = "cef-renderer")]
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(not(feature = "cef-renderer"), allow(dead_code))]
 pub enum AppShortcut {
     ToggleSidebar,
     NewTab,
@@ -116,6 +121,16 @@ enum RendererBackend {
     Cef(Box<cef::CefRenderer>),
 }
 
+pub struct PaneFrame<'a> {
+    pub ui: &'a mut egui::Ui,
+    pub frame: &'a mut eframe::Frame,
+    pub browser: &'a mut BrowserState,
+    pub address_input: &'a mut String,
+    pub theme: &'a Theme,
+    pub pane_rects: &'a [egui::Rect],
+    pub chrome_modal_open: bool,
+}
+
 impl BrowserRenderer {
     pub fn new(cef_available: bool, request_context_root: PathBuf) -> Self {
         Self {
@@ -124,17 +139,16 @@ impl BrowserRenderer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn show_panes(
-        &mut self,
-        ui: &mut egui::Ui,
-        frame: &mut eframe::Frame,
-        browser: &mut BrowserState,
-        address_input: &mut String,
-        theme: &Theme,
-        pane_rects: &[egui::Rect],
-        chrome_modal_open: bool,
-    ) {
+    pub fn show_panes(&mut self, pane_frame: PaneFrame<'_>) {
+        let PaneFrame {
+            ui,
+            frame,
+            browser,
+            address_input,
+            theme,
+            pane_rects,
+            chrome_modal_open,
+        } = pane_frame;
         self.backend.set_repaint_context(ui.ctx());
         self.backend.sync_tabs(browser.open_tabs());
         let popup_open = egui::Popup::is_any_open(ui.ctx()) || chrome_modal_open;
@@ -169,7 +183,7 @@ impl BrowserRenderer {
 
             let target = PageTarget::new(page.clone(), page_rect, ui.ctx().pixels_per_point());
             let status = self.backend.render(frame, &target);
-            if matches!(status, RendererStatus::Ready) {
+            if renderer_is_ready(&status) {
                 native_tabs.insert(page.tab_id);
             } else {
                 placeholder::paint_status(ui, page_rect, &page.url, theme, &status);
@@ -225,6 +239,7 @@ impl BrowserRenderer {
         self.backend.session_is_released(space_id)
     }
 
+    #[cfg(feature = "cef-renderer")]
     pub fn take_shortcut_requests(&mut self) -> Vec<AppShortcut> {
         self.backend.take_shortcut_requests()
     }
@@ -260,7 +275,6 @@ impl RendererBackend {
             }
         }
 
-        #[allow(unreachable_code)]
         Self::Placeholder(placeholder::PlaceholderRenderer::new())
     }
 
@@ -279,6 +293,7 @@ impl RendererBackend {
         }
     }
 
+    #[cfg(feature = "cef-renderer")]
     fn take_shortcut_requests(&mut self) -> Vec<AppShortcut> {
         match self {
             Self::Placeholder(_) => Vec::new(),
@@ -398,6 +413,18 @@ impl RendererBackend {
             #[cfg(feature = "cef-renderer")]
             Self::Cef(renderer) => renderer.session_is_released(_space_id),
         }
+    }
+}
+
+fn renderer_is_ready(status: &RendererStatus) -> bool {
+    #[cfg(feature = "cef-renderer")]
+    {
+        matches!(status, RendererStatus::Ready)
+    }
+    #[cfg(not(feature = "cef-renderer"))]
+    {
+        let _ = status;
+        false
     }
 }
 

@@ -37,7 +37,9 @@ pub fn paint_status(
     status: &RendererStatus,
 ) {
     let message = match status {
+        #[cfg(feature = "cef-renderer")]
         RendererStatus::Ready => "Page renderer ready",
+        #[cfg(feature = "cef-renderer")]
         RendererStatus::WaitingForNativeBrowser => "Starting Chromium renderer",
         RendererStatus::UnsupportedUrl(_) => "This URL is handled by Wind",
         RendererStatus::Unavailable(message) => message,

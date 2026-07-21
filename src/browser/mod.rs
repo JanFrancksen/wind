@@ -1,7 +1,4 @@
-use std::{
-    collections::HashSet,
-    ops::{Deref, DerefMut},
-};
+use std::collections::HashSet;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
@@ -752,6 +749,7 @@ impl Space {
         id
     }
 
+    #[cfg(any(feature = "cef-renderer", test))]
     pub fn add_background_tab(&mut self, input: &str) -> TabId {
         let tab = self.new_tab(input);
         let id = tab.id;
@@ -849,12 +847,12 @@ impl Space {
         TabActionOutcome::applied(active_page_before.change_to(self))
     }
 
-    pub fn set_page_url(&mut self, tab_id: TabId, page_revision: u64, url: String) {
+    fn set_page_url(&mut self, tab_id: TabId, page_revision: u64, url: String) -> bool {
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
-            return;
+            return false;
         };
         if !tab.is_open() || tab.render_revision != page_revision || tab.url == url {
-            return;
+            return false;
         }
 
         tab.url = url.clone();
@@ -863,14 +861,22 @@ impl Space {
         tab.history.truncate(tab.history_index + 1);
         tab.history.push(url);
         tab.history_index = tab.history.len() - 1;
+        true
     }
 
-    pub fn set_page_title(&mut self, tab_id: TabId, page_revision: u64, title: String) {
+    fn set_page_title(&mut self, tab_id: TabId, page_revision: u64, title: String) -> bool {
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
-            return;
+            return false;
         };
-        if tab.is_open() && tab.render_revision == page_revision && !title.trim().is_empty() {
+        if tab.is_open()
+            && tab.render_revision == page_revision
+            && !title.trim().is_empty()
+            && tab.title != title
+        {
             tab.title = title;
+            true
+        } else {
+            false
         }
     }
 
@@ -1192,10 +1198,9 @@ impl Space {
         self.separate_split_containing(tab_id);
         let closing_active = active_id == tab_id;
         let successor_start = if self.tabs[index].is_organized() {
-            let url = self.tabs[index]
-                .pinned_url()
-                .map(ToOwned::to_owned)
-                .expect("organized tabs have a pinned destination");
+            let Some(url) = self.tabs[index].pinned_url().map(ToOwned::to_owned) else {
+                return false;
+            };
             self.tabs[index].set_organized_session(OrganizedSession::Closed);
             reset_tab_session(&mut self.tabs[index], url);
             index + 1
@@ -1343,10 +1348,9 @@ impl Space {
         tab.render_revision = tab.render_revision.wrapping_add(1);
         clear_favicon(&mut tab);
         self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
         self.sort_tabs();
-        self.active_tab = self
-            .tab_index(tab_id)
-            .expect("transferred tab was inserted");
+        debug_assert_eq!(self.active_tab().id, tab_id);
     }
 }
 
@@ -1410,7 +1414,6 @@ impl BrowserState {
     }
 
     fn active_space_mut(&mut self) -> &mut Space {
-        self.dirty = true;
         let active_space_id = self.active_space_id;
         self.spaces
             .iter_mut()
@@ -1420,6 +1423,54 @@ impl BrowserState {
 
     pub fn space(&self, id: SpaceId) -> Option<&Space> {
         self.spaces.iter().find(|space| space.id == id)
+    }
+
+    pub fn tabs(&self) -> &[Tab] {
+        self.active_space().tabs()
+    }
+
+    pub fn active_tab(&self) -> &Tab {
+        self.active_space().active_tab()
+    }
+
+    pub fn active_url_for_input(&self) -> String {
+        self.active_space().active_url_for_input()
+    }
+
+    pub fn active_index(&self) -> usize {
+        self.active_space().active_index()
+    }
+
+    #[cfg(test)]
+    pub fn tab_ids(&self) -> impl Iterator<Item = TabId> + '_ {
+        self.active_space().tab_ids()
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        self.active_space().can_go_back()
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        self.active_space().can_go_forward()
+    }
+
+    pub fn add_tab(&mut self, input: &str) -> TabId {
+        let tab_id = self.active_space_mut().add_tab(input);
+        self.dirty = true;
+        tab_id
+    }
+
+    #[cfg(any(feature = "cef-renderer", test))]
+    pub fn add_background_tab(&mut self, input: &str) -> TabId {
+        let tab_id = self.active_space_mut().add_background_tab(input);
+        self.dirty = true;
+        tab_id
+    }
+
+    pub fn reopen_closed_tab(&mut self) -> Option<TabId> {
+        let reopened = self.active_space_mut().reopen_closed_tab();
+        self.dirty |= reopened.is_some();
+        reopened
     }
 
     pub fn create_space(&mut self, name: impl Into<String>, color: SpaceColor) -> SpaceId {
@@ -1529,9 +1580,9 @@ impl BrowserState {
             return false;
         }
 
-        let tab = self.spaces[source_index]
-            .take_open_tab_for_transfer(tab_id)
-            .expect("source tab was located above");
+        let Some(tab) = self.spaces[source_index].take_open_tab_for_transfer(tab_id) else {
+            return false;
+        };
         self.spaces[destination_index].receive_transferred_tab(tab);
         self.dirty = true;
         true
@@ -1582,16 +1633,21 @@ impl BrowserState {
             if let Some(target_space_id) =
                 target_space_id.filter(|space_id| *space_id != self.active_space_id)
             {
+                let previous_space_id = self.active_space_id;
                 self.active_space_id = target_space_id;
                 let outcome = self.active_space_mut().apply_tab_action(action);
                 return if outcome.status == TabActionStatus::Applied {
+                    self.dirty = true;
                     TabActionOutcome::applied(ActivePageChange::TabChanged)
                 } else {
+                    self.active_space_id = previous_space_id;
                     outcome
                 };
             }
         }
-        self.active_space_mut().apply_tab_action(action)
+        let outcome = self.active_space_mut().apply_tab_action(action);
+        self.dirty |= outcome.status == TabActionStatus::Applied;
+        outcome
     }
 
     pub fn split_tabs(&mut self, anchor: TabId, added: TabId, pane: SplitPane) -> bool {
@@ -1604,6 +1660,7 @@ impl BrowserState {
         self.active_space().active_split()
     }
 
+    #[cfg(any(feature = "cef-renderer", test))]
     pub fn separate_active_split(&mut self) -> bool {
         let active_id = self.active_tab().id;
         let applied = self.active_space_mut().separate_split_containing(active_id);
@@ -1665,15 +1722,13 @@ impl BrowserState {
 
     pub fn set_page_url(&mut self, tab_id: TabId, page_revision: u64, url: String) {
         if let Some(space) = self.space_containing_tab_mut(tab_id) {
-            space.set_page_url(tab_id, page_revision, url);
-            self.dirty = true;
+            self.dirty |= space.set_page_url(tab_id, page_revision, url);
         }
     }
 
     pub fn set_page_title(&mut self, tab_id: TabId, page_revision: u64, title: String) {
         if let Some(space) = self.space_containing_tab_mut(tab_id) {
-            space.set_page_title(tab_id, page_revision, title);
-            self.dirty = true;
+            self.dirty |= space.set_page_title(tab_id, page_revision, title);
         }
     }
 
@@ -1691,14 +1746,16 @@ impl BrowserState {
     }
 
     pub fn submit_address_input(&mut self, input: &str) -> AddressActionOutcome {
-        match parse_address_action(input) {
+        let outcome = match parse_address_action(input) {
             AddressAction::SwitchSpace(name) => {
                 simple_address_outcome(self.switch_space_named(&name))
             }
             AddressAction::NextSpace => simple_address_outcome(self.switch_space_by_offset(1)),
             AddressAction::PreviousSpace => simple_address_outcome(self.switch_space_by_offset(-1)),
             _ => self.active_space_mut().submit_address_input(input),
-        }
+        };
+        self.dirty |= outcome.status == TabActionStatus::Applied;
+        outcome
     }
 
     pub fn pending_session_deletions(&self) -> &[SpaceId] {
@@ -1706,20 +1763,21 @@ impl BrowserState {
     }
 
     pub fn mark_session_deleted(&mut self, id: SpaceId) {
+        let previous_len = self.pending_session_deletions.len();
         self.pending_session_deletions
             .retain(|candidate| *candidate != id);
-        self.dirty = true;
+        self.dirty |= self.pending_session_deletions.len() != previous_len;
     }
 
-    pub fn take_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.dirty
     }
 
-    pub fn take_urgent_save(&mut self) -> bool {
-        std::mem::take(&mut self.urgent_save)
+    pub fn urgent_save_pending(&self) -> bool {
+        self.urgent_save
     }
 
-    pub(crate) fn mark_clean(&mut self) {
+    pub(crate) fn mark_saved(&mut self) {
         self.dirty = false;
         self.urgent_save = false;
     }
@@ -1779,20 +1837,6 @@ impl BrowserState {
         self.pending_session_deletions
             .iter()
             .all(|deleted| !space_ids.contains(deleted))
-    }
-}
-
-impl Deref for BrowserState {
-    type Target = Space;
-
-    fn deref(&self) -> &Self::Target {
-        self.active_space()
-    }
-}
-
-impl DerefMut for BrowserState {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.active_space_mut()
     }
 }
 
@@ -2338,14 +2382,41 @@ mod tests {
     fn only_organized_favicon_updates_schedule_state_saves() {
         let mut browser = BrowserState::with_initial_url("today.example");
         let today = browser.active_tab().id;
-        browser.mark_clean();
+        browser.mark_saved();
         browser.set_favicon(today, 0, Favicon::from_rgba(1, 1, vec![1, 2, 3, 255]));
-        assert!(!browser.take_dirty());
+        assert!(!browser.has_unsaved_changes());
 
         browser.apply_tab_action(TabAction::new(today, TabActionKind::TogglePin));
-        browser.mark_clean();
+        browser.mark_saved();
         browser.set_favicon(today, 0, Favicon::from_rgba(1, 1, vec![4, 5, 6, 255]));
-        assert!(browser.take_dirty());
+        assert!(browser.has_unsaved_changes());
+    }
+
+    #[test]
+    fn rejected_actions_and_stale_renderer_updates_do_not_schedule_state_saves() {
+        let mut browser = BrowserState::with_initial_url("example.com");
+        let tab_id = browser.active_tab().id;
+        let page_revision = browser.active_page().render_revision;
+        browser.mark_saved();
+
+        let outcome = browser.apply_tab_action(TabAction::new(tab_id, TabActionKind::MoveUp));
+        browser.set_page_url(
+            tab_id,
+            page_revision.wrapping_add(1),
+            "https://stale.example".to_owned(),
+        );
+        browser.set_page_title(
+            tab_id,
+            page_revision.wrapping_add(1),
+            "Stale title".to_owned(),
+        );
+
+        assert!(matches!(
+            outcome.status,
+            TabActionStatus::NotApplied(TabActionRejection::Unavailable)
+        ));
+        assert!(!browser.has_unsaved_changes());
+        assert_eq!(browser.active_tab().url, "https://example.com");
     }
 
     #[test]
@@ -2667,7 +2738,7 @@ mod tests {
         assert!(browser.delete_space(private));
         assert_eq!(browser.active_space().id(), work);
         assert_eq!(browser.pending_session_deletions(), &[private]);
-        assert!(browser.take_urgent_save());
+        assert!(browser.urgent_save_pending());
     }
 
     #[test]
