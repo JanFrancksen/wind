@@ -170,19 +170,24 @@ impl eframe::App for BrowserApp {
         }
         #[cfg(feature = "cef-renderer")]
         if let Some(runtime) = self.cef_runtime.take() {
-            if shutdown.browsers_closed {
+            if cef_shutdown_is_safe(shutdown) {
                 runtime.shutdown();
             } else {
                 // Global CEF shutdown is unsafe while browsers are still
-                // closing. Keep the runtime/library loaded and let process
-                // teardown reclaim it; the persisted deletion tombstones will
-                // retry data cleanup on the next launch.
+                // closing or asynchronous cookie callbacks are pending. Keep
+                // the runtime/library loaded and let process teardown reclaim
+                // it; persisted deletion tombstones retry cleanup next launch.
                 #[cfg(not(target_os = "macos"))]
                 eprintln!("Timed out waiting for CEF browsers to close; deferring shutdown");
                 std::mem::forget(runtime);
             }
         }
     }
+}
+
+#[cfg(feature = "cef-renderer")]
+fn cef_shutdown_is_safe(shutdown: renderer::RendererShutdownOutcome) -> bool {
+    shutdown.session_data_flushed && shutdown.browsers_closed
 }
 
 #[cfg(target_os = "macos")]
@@ -279,6 +284,27 @@ fn runtime_app_icon() -> egui::IconData {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "cef-renderer")]
+    #[test]
+    fn cef_shutdown_requires_cookie_flush_and_closed_browsers() {
+        let pending_cookie_flush = crate::renderer::RendererShutdownOutcome {
+            session_data_flushed: false,
+            browsers_closed: true,
+        };
+        let closing_browser = crate::renderer::RendererShutdownOutcome {
+            session_data_flushed: true,
+            browsers_closed: false,
+        };
+        let complete = crate::renderer::RendererShutdownOutcome {
+            session_data_flushed: true,
+            browsers_closed: true,
+        };
+
+        assert!(!super::cef_shutdown_is_safe(pending_cookie_flush));
+        assert!(!super::cef_shutdown_is_safe(closing_browser));
+        assert!(super::cef_shutdown_is_safe(complete));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_does_not_override_the_bundled_application_icon() {

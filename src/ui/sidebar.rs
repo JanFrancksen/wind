@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use eframe::egui;
 
 use crate::{
@@ -34,6 +36,11 @@ enum DropTarget {
 struct TabSelection {
     selected: bool,
     focused: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SidebarTabRow {
+    tab_ids: Vec<TabId>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -799,6 +806,7 @@ fn highlighted_pinned_tabs(
         .iter()
         .filter(|tab| tab.group() == TabGroup::Highlight)
         .filter(|tab| dragging.is_none_or(|dragged| tab.id != dragged.id))
+        .filter(|tab| !tab_is_in_intact_sidebar_split(browser, tab.id, dragging))
         .cloned()
         .collect::<Vec<_>>();
 
@@ -1243,6 +1251,95 @@ fn tab_sections(
     );
 }
 
+fn sidebar_tab_rows(
+    browser: &BrowserState,
+    group: TabGroup,
+    dragging: Option<DraggedTab>,
+) -> Vec<SidebarTabRow> {
+    let visible_tab_ids = browser
+        .tabs()
+        .iter()
+        .filter(|tab| dragging.is_none_or(|dragged| tab.id != dragged.id))
+        .map(|tab| tab.id)
+        .collect::<HashSet<_>>();
+    let mut emitted = HashSet::new();
+    let mut rows = Vec::new();
+
+    for tab in browser.tabs() {
+        if !visible_tab_ids.contains(&tab.id) || emitted.contains(&tab.id) {
+            continue;
+        }
+
+        let intact_split = browser.active_space().split_for_tab(tab.id).filter(|pair| {
+            visible_tab_ids.contains(&pair.left()) && visible_tab_ids.contains(&pair.right())
+        });
+        let tab_ids = if let Some(pair) = intact_split {
+            if split_sidebar_group(browser, pair.left(), pair.right()) != group {
+                continue;
+            }
+            vec![pair.left(), pair.right()]
+        } else {
+            if tab.group() != group {
+                continue;
+            }
+            vec![tab.id]
+        };
+        emitted.extend(tab_ids.iter().copied());
+        rows.push(SidebarTabRow { tab_ids });
+    }
+
+    rows
+}
+
+fn split_sidebar_group(browser: &BrowserState, left: TabId, right: TabId) -> TabGroup {
+    let groups = [left, right].map(|tab_id| {
+        browser
+            .tabs()
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map_or(TabGroup::Today, Tab::group)
+    });
+    if groups.iter().all(|group| *group == TabGroup::Today) {
+        TabGroup::Today
+    } else {
+        TabGroup::Pinned
+    }
+}
+
+fn tab_is_in_intact_sidebar_split(
+    browser: &BrowserState,
+    tab_id: TabId,
+    dragging: Option<DraggedTab>,
+) -> bool {
+    browser
+        .active_space()
+        .split_for_tab(tab_id)
+        .is_some_and(|pair| dragging.is_none_or(|dragged| !pair.contains(dragged.id)))
+}
+
+fn sidebar_row_tab_rects(rect: egui::Rect, tab_count: usize, gap: f32) -> Vec<egui::Rect> {
+    if tab_count != 2 {
+        return vec![rect];
+    }
+
+    let gap = gap.clamp(0.0, rect.width());
+    let tab_width = ((rect.width() - gap) * 0.5).max(0.0);
+    vec![
+        egui::Rect::from_min_size(rect.min, egui::vec2(tab_width, rect.height())),
+        egui::Rect::from_min_size(
+            egui::pos2(rect.left() + tab_width + gap, rect.top()),
+            egui::vec2(tab_width, rect.height()),
+        ),
+    ]
+}
+
+fn tab_insertion_index(rows: &[SidebarTabRow], row_index: usize) -> usize {
+    rows.iter()
+        .take(row_index)
+        .map(|row| row.tab_ids.len())
+        .sum()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tab_row_group(
     ui: &mut egui::Ui,
@@ -1255,15 +1352,9 @@ fn tab_row_group(
     actions: &mut Vec<TabAction>,
     animate_reorder: bool,
 ) {
-    let mut tabs = browser
-        .tabs()
-        .iter()
-        .filter(|tab| tab.group() == group)
-        .filter(|tab| dragging.is_none_or(|dragged| tab.id != dragged.id))
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut rows = sidebar_tab_rows(browser, group, dragging);
 
-    if tabs.is_empty() && dragging.is_none() {
+    if rows.is_empty() && dragging.is_none() {
         return;
     }
 
@@ -1274,12 +1365,12 @@ fn tab_row_group(
     let row_height = theme.tokens.component.tab.height;
     let spacing = theme.tokens.primitive.space.xs;
     let top_left = ui.cursor().min;
-    let accept_rows = if dragging.is_some() && tabs.is_empty() {
+    let accept_rows = if dragging.is_some() && rows.is_empty() {
         1
     } else if dragging.is_some() {
-        tabs.len() + 1
+        rows.len() + 1
     } else {
-        tabs.len().max(1)
+        rows.len().max(1)
     };
     let accept_height =
         accept_rows as f32 * row_height + accept_rows.saturating_sub(1) as f32 * spacing;
@@ -1287,38 +1378,47 @@ fn tab_row_group(
 
     let split_target = dragging.and_then(|_| {
         let pointer = ui.ctx().pointer_interact_pos()?;
-        let (index, side) = row_split_intent(
+        let (index, pane) = row_split_intent(
             pointer,
             top_left,
             row_width,
             row_height,
             spacing,
-            tabs.len(),
+            rows.len(),
         )?;
-        Some((tabs[index].id, side))
+        let row = rows.get(index)?;
+        (row.tab_ids.len() == 1).then_some((row.tab_ids[0], pane))
     });
     let hovered_index = dragging.filter(|_| split_target.is_none()).and_then(|_| {
         let pointer = ui.ctx().pointer_interact_pos()?;
         accept_rect
             .contains(pointer)
-            .then(|| row_insertion_index(pointer.y, top_left.y, row_height, spacing, tabs.len()))
+            .then(|| row_insertion_index(pointer.y, top_left.y, row_height, spacing, rows.len()))
     });
     if let Some((anchor, pane)) = split_target {
         *drop_target = Some(DropTarget::Split { anchor, pane });
     } else if let Some(index) = hovered_index {
-        *drop_target = Some(DropTarget::Place { group, index });
+        *drop_target = Some(DropTarget::Place {
+            group,
+            index: tab_insertion_index(&rows, index),
+        });
     }
 
-    let source_placeholder =
-        dragging.and_then(|dragged| group_index(browser.tabs(), dragged.id, group));
+    let source_placeholder = dragging.and_then(|dragged| {
+        let original_rows = sidebar_tab_rows(browser, group, None);
+        original_rows
+            .iter()
+            .position(|row| row.tab_ids.contains(&dragged.id))
+            .filter(|index| original_rows[*index].tab_ids.len() == 1)
+    });
     let placeholder = if split_target.is_some() {
         None
     } else {
         hovered_index
             .or(source_placeholder)
-            .or_else(|| (dragging.is_some() && tabs.is_empty()).then_some(0))
+            .or_else(|| (dragging.is_some() && rows.is_empty()).then_some(0))
     };
-    let mut slots = tabs.drain(..).map(Some).collect::<Vec<_>>();
+    let mut slots = rows.drain(..).map(Some).collect::<Vec<_>>();
     if let Some(index) = placeholder {
         slots.insert(index.min(slots.len()), None);
     }
@@ -1329,37 +1429,75 @@ fn tab_row_group(
     let (block_rect, _) =
         ui.allocate_exact_size(egui::vec2(row_width, block_height), egui::Sense::hover());
 
-    for (slot, tab) in slots.iter().enumerate() {
+    for (slot, row) in slots.iter().enumerate() {
         let target_rect = egui::Rect::from_min_size(
             block_rect.min + egui::vec2(0.0, slot as f32 * (row_height + spacing)),
             egui::vec2(row_width, row_height),
         );
-        let Some(tab) = tab else {
+        let Some(row) = row else {
             paint_drop_placeholder(ui, target_rect, label, theme);
             continue;
         };
         let rect = if animate_reorder {
-            animated_tab_rect(ui, tab.id, target_rect, theme)
+            animated_tab_rect(ui, row.tab_ids[0], target_rect, theme)
         } else {
             target_rect
         };
-        paint_tab_row_at(
-            ui,
-            rect,
-            tab,
-            TabSelection {
-                selected: browser
-                    .active_split()
-                    .is_some_and(|pair| pair.contains(tab.id))
-                    || browser.active_tab().id == tab.id,
-                focused: browser.active_tab().id == tab.id,
-            },
-            browser.context_actions(tab.id),
-            theme,
-            actions,
-        );
-        if let Some((_, pane)) = split_target.filter(|(anchor, _)| *anchor == tab.id) {
-            paint_split_drop_target(ui, rect, pane, theme);
+
+        if row.tab_ids.len() == 2 {
+            let active = browser
+                .active_split()
+                .is_some_and(|pair| row.tab_ids.iter().all(|tab_id| pair.contains(*tab_id)));
+            ui.painter().rect_filled(
+                rect,
+                theme.tokens.component.tab.radius,
+                if active {
+                    theme.tokens.semantic.color.surface_active
+                } else {
+                    theme.tokens.semantic.color.surface
+                },
+            );
+            ui.painter().rect_stroke(
+                rect,
+                theme.tokens.component.tab.radius,
+                egui::Stroke::new(
+                    theme.tokens.primitive.stroke.hairline,
+                    if active {
+                        theme.tokens.semantic.color.focus
+                    } else {
+                        theme.tokens.semantic.color.border
+                    },
+                ),
+                egui::StrokeKind::Inside,
+            );
+        }
+
+        for (tab_id, tab_rect) in row.tab_ids.iter().copied().zip(sidebar_row_tab_rects(
+            rect.shrink(1.0),
+            row.tab_ids.len(),
+            2.0,
+        )) {
+            let Some(tab) = browser.tabs().iter().find(|tab| tab.id == tab_id) else {
+                continue;
+            };
+            paint_tab_row_at(
+                ui,
+                tab_rect,
+                tab,
+                TabSelection {
+                    selected: browser
+                        .active_split()
+                        .is_some_and(|pair| pair.contains(tab.id))
+                        || browser.active_tab().id == tab.id,
+                    focused: browser.active_tab().id == tab.id,
+                },
+                browser.context_actions(tab.id),
+                theme,
+                actions,
+            );
+            if let Some((_, pane)) = split_target.filter(|(anchor, _)| *anchor == tab.id) {
+                paint_split_drop_target(ui, tab_rect, pane, theme);
+            }
         }
     }
 }
@@ -1774,7 +1912,8 @@ mod tests {
 
     use super::{
         grid_insertion_index, has_modal_open, normalized_favicon_image, row_insertion_index,
-        row_split_intent, space_offsets, tab_action_for_button,
+        row_split_intent, sidebar_row_tab_rects, sidebar_tab_rows, space_offsets,
+        tab_action_for_button,
     };
 
     #[test]
@@ -1817,6 +1956,51 @@ mod tests {
             row_split_intent(egui::pos2(60.0, 42.0), origin, 200.0, 40.0, 4.0, 2),
             None
         );
+    }
+
+    #[test]
+    fn split_tabs_share_one_horizontal_sidebar_row() {
+        let mut browser = BrowserState::with_initial_url("left.example");
+        let left = browser.active_tab().id;
+        let right = browser.add_tab("right.example");
+        assert!(browser.split_tabs(left, right, SplitPane::Right));
+
+        let rows = sidebar_tab_rows(&browser, crate::browser::TabGroup::Today, None);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tab_ids, vec![left, right]);
+    }
+
+    #[test]
+    fn split_sidebar_row_lays_its_tabs_out_left_and_right() {
+        let row = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(202.0, 40.0));
+
+        let tabs = sidebar_row_tab_rects(row, 2, 2.0);
+
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].min, row.min);
+        assert_eq!(tabs[0].width(), 100.0);
+        assert_eq!(tabs[1].left(), tabs[0].right() + 2.0);
+        assert_eq!(tabs[1].right(), row.right());
+    }
+
+    #[test]
+    fn a_split_pair_stays_together_across_sidebar_groups() {
+        let mut browser = BrowserState::with_initial_url("pinned.example");
+        let pinned = browser.active_tab().id;
+        browser.apply_tab_action(crate::browser::TabAction::new(
+            pinned,
+            crate::browser::TabActionKind::TogglePin,
+        ));
+        let today = browser.add_tab("today.example");
+        assert!(browser.split_tabs(pinned, today, SplitPane::Right));
+
+        let pinned_rows = sidebar_tab_rows(&browser, crate::browser::TabGroup::Pinned, None);
+        let today_rows = sidebar_tab_rows(&browser, crate::browser::TabGroup::Today, None);
+
+        assert_eq!(pinned_rows.len(), 1);
+        assert_eq!(pinned_rows[0].tab_ids, vec![pinned, today]);
+        assert!(today_rows.is_empty());
     }
 
     #[test]
