@@ -401,14 +401,11 @@ impl RendererBackend {
 }
 
 fn paint_pane_frame(ui: &egui::Ui, rect: egui::Rect, focused: bool, theme: &Theme) {
-    ui.painter().rect_filled(
-        rect,
-        theme.tokens.primitive.radius.md,
-        theme.tokens.semantic.color.chrome,
-    );
+    ui.painter()
+        .rect_filled(rect, 0, theme.tokens.semantic.color.chrome);
     ui.painter().rect_stroke(
         rect.shrink(0.5),
-        theme.tokens.primitive.radius.md,
+        0,
         egui::Stroke::new(
             if focused { 2.0 } else { 1.0 },
             if focused {

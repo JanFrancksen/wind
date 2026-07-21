@@ -364,7 +364,7 @@ fn show_split_pane_headers(
         let color = &theme.tokens.semantic.color;
         ui.painter().rect_filled(
             header,
-            theme.tokens.primitive.radius.sm,
+            0,
             if focused {
                 color.surface_active
             } else {

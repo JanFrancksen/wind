@@ -1444,38 +1444,15 @@ fn tab_row_group(
             target_rect
         };
 
-        if row.tab_ids.len() == 2 {
-            let active = browser
-                .active_split()
-                .is_some_and(|pair| row.tab_ids.iter().all(|tab_id| pair.contains(*tab_id)));
-            ui.painter().rect_filled(
-                rect,
-                theme.tokens.component.tab.radius,
-                if active {
-                    theme.tokens.semantic.color.surface_active
-                } else {
-                    theme.tokens.semantic.color.surface
-                },
-            );
-            ui.painter().rect_stroke(
-                rect,
-                theme.tokens.component.tab.radius,
-                egui::Stroke::new(
-                    theme.tokens.primitive.stroke.hairline,
-                    if active {
-                        theme.tokens.semantic.color.focus
-                    } else {
-                        theme.tokens.semantic.color.border
-                    },
-                ),
-                egui::StrokeKind::Inside,
-            );
-        }
-
+        let split_row = row.tab_ids.len() == 2;
         for (tab_id, tab_rect) in row.tab_ids.iter().copied().zip(sidebar_row_tab_rects(
-            rect.shrink(1.0),
+            rect,
             row.tab_ids.len(),
-            2.0,
+            if split_row {
+                theme.tokens.primitive.space.xs
+            } else {
+                0.0
+            },
         )) {
             let Some(tab) = browser.tabs().iter().find(|tab| tab.id == tab_id) else {
                 continue;
@@ -1495,6 +1472,26 @@ fn tab_row_group(
                 theme,
                 actions,
             );
+            if split_row {
+                let focused = browser.active_tab().id == tab.id;
+                ui.painter().rect_stroke(
+                    tab_rect.shrink(0.5),
+                    theme.tokens.component.tab.radius,
+                    egui::Stroke::new(
+                        if focused {
+                            theme.tokens.primitive.stroke.thin
+                        } else {
+                            theme.tokens.primitive.stroke.hairline
+                        },
+                        if focused {
+                            theme.tokens.semantic.color.focus
+                        } else {
+                            theme.tokens.semantic.color.border
+                        },
+                    ),
+                    egui::StrokeKind::Inside,
+                );
+            }
             if let Some((_, pane)) = split_target.filter(|(anchor, _)| *anchor == tab.id) {
                 paint_split_drop_target(ui, tab_rect, pane, theme);
             }
