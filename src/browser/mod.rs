@@ -17,6 +17,98 @@ pub struct TabId(Uuid);
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpaceId(Uuid);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitPane {
+    Left,
+    Right,
+}
+
+impl SplitPane {
+    pub fn from_index(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(Self::Left),
+            1 => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SplitPair {
+    left: TabId,
+    right: TabId,
+    ratio: f32,
+}
+
+impl SplitPair {
+    const MIN_RATIO: f32 = 0.2;
+    const MAX_RATIO: f32 = 0.8;
+
+    fn new(anchor: TabId, added: TabId, pane: SplitPane) -> Self {
+        let (left, right) = match pane {
+            SplitPane::Left => (added, anchor),
+            SplitPane::Right => (anchor, added),
+        };
+        Self {
+            left,
+            right,
+            ratio: 0.5,
+        }
+    }
+
+    pub fn left(self) -> TabId {
+        self.left
+    }
+
+    pub fn right(self) -> TabId {
+        self.right
+    }
+
+    pub fn ratio(self) -> f32 {
+        self.ratio
+    }
+
+    pub fn tab(self, pane: SplitPane) -> TabId {
+        match pane {
+            SplitPane::Left => self.left,
+            SplitPane::Right => self.right,
+        }
+    }
+
+    pub fn contains(self, tab_id: TabId) -> bool {
+        self.left == tab_id || self.right == tab_id
+    }
+
+    pub fn partner(self, tab_id: TabId) -> Option<TabId> {
+        if self.left == tab_id {
+            Some(self.right)
+        } else if self.right == tab_id {
+            Some(self.left)
+        } else {
+            None
+        }
+    }
+
+    fn set_ratio(&mut self, ratio: f32) -> bool {
+        if !ratio.is_finite() {
+            return false;
+        }
+        let ratio = ratio.clamp(Self::MIN_RATIO, Self::MAX_RATIO);
+        if (self.ratio - ratio).abs() <= f32::EPSILON {
+            return false;
+        }
+        self.ratio = ratio;
+        true
+    }
+
+    fn repair_ratio(&mut self) {
+        if !self.ratio.is_finite() {
+            self.ratio = 0.5;
+        }
+        self.ratio = self.ratio.clamp(Self::MIN_RATIO, Self::MAX_RATIO);
+    }
+}
+
 impl SpaceId {
     pub fn cache_key(self) -> String {
         self.0.simple().to_string()
@@ -78,6 +170,8 @@ pub enum TabActionKind {
     Demote,
     MoveUp,
     MoveDown,
+    SplitRight,
+    SeparateSplit,
     MoveToSpace { space_id: SpaceId, name: String },
     ReturnToPinned,
     Place { group: TabGroup, index: usize },
@@ -151,6 +245,9 @@ pub enum AddressAction {
     Back,
     Forward,
     Reload,
+    SplitRight,
+    SeparateSplit,
+    FocusSplitPane(SplitPane),
     SwitchSpace(String),
     NextSpace,
     PreviousSpace,
@@ -480,6 +577,8 @@ pub struct Space {
     tabs: Vec<Tab>,
     active_tab: usize,
     recently_closed: Vec<RecentlyClosedTab>,
+    #[serde(default)]
+    split_pairs: Vec<SplitPair>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -523,6 +622,7 @@ impl Space {
             tabs: Vec::new(),
             active_tab: 0,
             recently_closed: Vec::new(),
+            split_pairs: Vec::new(),
         };
         space.add_tab(input);
         space
@@ -569,6 +669,78 @@ impl Space {
         } else {
             url.clone()
         }
+    }
+
+    pub fn split_for_tab(&self, tab_id: TabId) -> Option<&SplitPair> {
+        self.split_pairs.iter().find(|pair| pair.contains(tab_id))
+    }
+
+    pub fn active_split(&self) -> Option<&SplitPair> {
+        self.split_for_tab(self.active_tab().id)
+    }
+
+    fn split_tabs(&mut self, anchor: TabId, added: TabId, pane: SplitPane) -> bool {
+        if anchor == added
+            || !self
+                .tabs
+                .iter()
+                .any(|tab| tab.id == anchor && tab.is_open())
+            || !self.tabs.iter().any(|tab| tab.id == added && tab.is_open())
+        {
+            return false;
+        }
+
+        self.split_pairs
+            .retain(|pair| !pair.contains(anchor) && !pair.contains(added));
+        self.split_pairs.push(SplitPair::new(anchor, added, pane));
+        self.select_tab_by_id(added)
+    }
+
+    fn separate_split_containing(&mut self, tab_id: TabId) -> bool {
+        let previous_len = self.split_pairs.len();
+        self.split_pairs.retain(|pair| !pair.contains(tab_id));
+        self.split_pairs.len() != previous_len
+    }
+
+    fn resize_active_split(&mut self, ratio: f32) -> bool {
+        let active_id = self.active_tab().id;
+        self.split_pairs
+            .iter_mut()
+            .find(|pair| pair.contains(active_id))
+            .is_some_and(|pair| pair.set_ratio(ratio))
+    }
+
+    fn split_right(&mut self, tab_id: TabId) -> bool {
+        let active_id = self.active_tab().id;
+        if tab_id == active_id {
+            let added = self.add_tab("arc://new-tab");
+            self.split_tabs(active_id, added, SplitPane::Right)
+        } else {
+            self.split_tabs(active_id, tab_id, SplitPane::Right)
+        }
+    }
+
+    fn repair_splits(&mut self) {
+        let open_tabs = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.is_open())
+            .map(|tab| tab.id)
+            .collect::<HashSet<_>>();
+        let mut claimed_tabs = HashSet::new();
+        self.split_pairs.retain_mut(|pair| {
+            pair.repair_ratio();
+            let valid = pair.left != pair.right
+                && open_tabs.contains(&pair.left)
+                && open_tabs.contains(&pair.right)
+                && !claimed_tabs.contains(&pair.left)
+                && !claimed_tabs.contains(&pair.right);
+            if valid {
+                claimed_tabs.insert(pair.left);
+                claimed_tabs.insert(pair.right);
+            }
+            valid
+        });
     }
 
     pub fn add_tab(&mut self, input: &str) -> TabId {
@@ -623,6 +795,11 @@ impl Space {
         if tab.is_away_from_pinned() {
             actions.push(TabActionKind::ReturnToPinned);
         }
+        if self.split_for_tab(tab_id).is_some() {
+            actions.push(TabActionKind::SeparateSplit);
+        } else if tab.is_open() {
+            actions.push(TabActionKind::SplitRight);
+        }
         match tab.group() {
             TabGroup::Highlight => actions.push(TabActionKind::Demote),
             TabGroup::Pinned => actions.push(TabActionKind::Promote),
@@ -664,6 +841,8 @@ impl Space {
             TabActionKind::Demote => self.set_group(action.tab_id, TabGroup::Pinned),
             TabActionKind::MoveUp => self.move_tab_by(action.tab_id, -1),
             TabActionKind::MoveDown => self.move_tab_by(action.tab_id, 1),
+            TabActionKind::SplitRight => self.split_right(action.tab_id),
+            TabActionKind::SeparateSplit => self.separate_split_containing(action.tab_id),
             TabActionKind::MoveToSpace { .. } => false,
             TabActionKind::ReturnToPinned => self.return_to_pinned(action.tab_id),
             TabActionKind::Place { group, index } => self.place_tab(action.tab_id, group, index),
@@ -786,6 +965,24 @@ impl Space {
                 self.apply_tab_action(TabAction::new(active_id, TabActionKind::Reload))
                     .status
             }
+            AddressAction::SplitRight => {
+                self.apply_tab_action(TabAction::new(active_id, TabActionKind::SplitRight))
+                    .status
+            }
+            AddressAction::SeparateSplit => {
+                self.apply_tab_action(TabAction::new(active_id, TabActionKind::SeparateSplit))
+                    .status
+            }
+            AddressAction::FocusSplitPane(pane) => {
+                let target = self.active_split().map(|pair| pair.tab(*pane));
+                target.map_or(
+                    TabActionStatus::NotApplied(TabActionRejection::Unavailable),
+                    |tab_id| {
+                        self.apply_tab_action(TabAction::new(tab_id, TabActionKind::Select))
+                            .status
+                    },
+                )
+            }
             AddressAction::SwitchSpace(_)
             | AddressAction::NextSpace
             | AddressAction::PreviousSpace => {
@@ -850,6 +1047,10 @@ impl Space {
             TabActionKind::Demote => tab.group() == TabGroup::Highlight,
             TabActionKind::MoveUp => self.can_move(action.tab_id, -1),
             TabActionKind::MoveDown => self.can_move(action.tab_id, 1),
+            TabActionKind::SplitRight => {
+                tab.is_open() && self.split_for_tab(action.tab_id).is_none()
+            }
+            TabActionKind::SeparateSplit => self.split_for_tab(action.tab_id).is_some(),
             TabActionKind::MoveToSpace { .. } => false,
             TabActionKind::ReturnToPinned => tab.is_away_from_pinned(),
             TabActionKind::Place { .. } => true,
@@ -990,6 +1191,10 @@ impl Space {
         }
 
         let active_id = self.active_tab().id;
+        let split_partner = self
+            .split_for_tab(tab_id)
+            .and_then(|pair| pair.partner(tab_id));
+        self.separate_split_containing(tab_id);
         let closing_active = active_id == tab_id;
         let successor_start = if self.tabs[index].is_organized() {
             let url = self.tabs[index]
@@ -1006,7 +1211,11 @@ impl Space {
         };
 
         if closing_active {
-            self.activate_near(successor_start);
+            let partner_selected =
+                split_partner.is_some_and(|partner| self.select_tab_by_id(partner));
+            if !partner_selected {
+                self.activate_near(successor_start);
+            }
         } else {
             self.active_tab = self.tab_index(active_id).unwrap_or(0);
         }
@@ -1116,9 +1325,17 @@ impl Space {
             .iter()
             .position(|tab| tab.id == tab_id && tab.is_open())?;
         let was_active = self.active_tab == index;
+        let split_partner = self
+            .split_for_tab(tab_id)
+            .and_then(|pair| pair.partner(tab_id));
+        self.separate_split_containing(tab_id);
         let tab = self.tabs.remove(index);
         if was_active {
-            self.activate_near(index);
+            let partner_selected =
+                split_partner.is_some_and(|partner| self.select_tab_by_id(partner));
+            if !partner_selected {
+                self.activate_near(index);
+            }
         } else if self.active_tab > index {
             self.active_tab -= 1;
         }
@@ -1382,6 +1599,29 @@ impl BrowserState {
         self.active_space_mut().apply_tab_action(action)
     }
 
+    pub fn split_tabs(&mut self, anchor: TabId, added: TabId, pane: SplitPane) -> bool {
+        let applied = self.active_space_mut().split_tabs(anchor, added, pane);
+        self.dirty |= applied;
+        applied
+    }
+
+    pub fn active_split(&self) -> Option<&SplitPair> {
+        self.active_space().active_split()
+    }
+
+    pub fn separate_active_split(&mut self) -> bool {
+        let active_id = self.active_tab().id;
+        let applied = self.active_space_mut().separate_split_containing(active_id);
+        self.dirty |= applied;
+        applied
+    }
+
+    pub fn resize_active_split(&mut self, ratio: f32) -> bool {
+        let applied = self.active_space_mut().resize_active_split(ratio);
+        self.dirty |= applied;
+        applied
+    }
+
     pub fn active_page(&self) -> ActivePage {
         let space = self.active_space();
         let tab = space.active_tab();
@@ -1392,6 +1632,31 @@ impl BrowserState {
             render_revision: tab.render_revision,
             session_revision: tab.session_revision,
         }
+    }
+
+    pub fn active_pages(&self) -> Vec<ActivePage> {
+        let space = self.active_space();
+        let Some(split) = space.active_split() else {
+            return vec![self.active_page()];
+        };
+        let tab_ids = [split.left(), split.right()];
+
+        tab_ids
+            .into_iter()
+            .filter_map(|tab_id| {
+                space
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == tab_id)
+                    .map(|tab| ActivePage {
+                        space_id: space.id,
+                        tab_id: tab.id,
+                        url: tab.url.clone(),
+                        render_revision: tab.render_revision,
+                        session_revision: tab.session_revision,
+                    })
+            })
+            .collect()
     }
 
     pub fn open_tabs(&self) -> impl Iterator<Item = OpenTab> + '_ {
@@ -1478,6 +1743,7 @@ impl BrowserState {
             if !space.tabs[space.active_tab].is_open() {
                 space.activate_near(space.active_tab);
             }
+            space.repair_splits();
         }
         if self.space(self.active_space_id).is_none() {
             self.active_space_id = self.spaces[0].id;
@@ -1614,6 +1880,16 @@ pub fn parse_address_action(input: &str) -> AddressAction {
             "back" => AddressAction::Back,
             "forward" => AddressAction::Forward,
             "reload" | "refresh" => AddressAction::Reload,
+            "split" | "split-right" | "add-right-split" => AddressAction::SplitRight,
+            "separate" | "separate-split" | "close-split" => AddressAction::SeparateSplit,
+            "focus-split" => rest
+                .and_then(|value| value.parse::<usize>().ok())
+                .and_then(|index| index.checked_sub(1))
+                .and_then(SplitPane::from_index)
+                .map_or_else(
+                    || AddressAction::Navigate(trimmed.to_string()),
+                    AddressAction::FocusSplitPane,
+                ),
             "space" => rest.map_or_else(
                 || AddressAction::Navigate(trimmed.to_string()),
                 |name| AddressAction::SwitchSpace(name.to_owned()),
@@ -1672,7 +1948,7 @@ fn title_for_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivePageChange, AddressAction, BrowserState, Favicon, SpaceColor, TabAction,
+        ActivePageChange, AddressAction, BrowserState, Favicon, SpaceColor, SplitPane, TabAction,
         TabActionKind, TabActionOutcome, TabActionRejection, TabActionStatus, TabGroup,
         normalize_url, parse_address_action,
     };
@@ -1736,6 +2012,15 @@ mod tests {
             AddressAction::MoveTabDown
         );
         assert_eq!(parse_address_action("/back"), AddressAction::Back);
+        assert_eq!(parse_address_action(":split"), AddressAction::SplitRight);
+        assert_eq!(
+            parse_address_action(":focus-split 2"),
+            AddressAction::FocusSplitPane(SplitPane::Right)
+        );
+        assert_eq!(
+            parse_address_action(":separate"),
+            AddressAction::SeparateSplit
+        );
         assert_eq!(
             parse_address_action("docs.rs"),
             AddressAction::Navigate("docs.rs".to_string())
@@ -1760,6 +2045,28 @@ mod tests {
         browser.submit_address_input(":reopen");
         assert_eq!(browser.tabs().len(), 3);
         assert_eq!(browser.active_tab().url, "https://example.com");
+    }
+
+    #[test]
+    fn address_commands_create_focus_and_separate_a_split() {
+        let mut browser = BrowserState::with_initial_url("left.example");
+        let left = browser.active_tab().id;
+
+        assert_eq!(
+            browser.submit_address_input(":split").status,
+            TabActionStatus::Applied
+        );
+        assert_eq!(browser.active_pages().len(), 2);
+        assert_eq!(
+            browser.submit_address_input(":focus-split 1").status,
+            TabActionStatus::Applied
+        );
+        assert_eq!(browser.active_tab().id, left);
+        assert_eq!(
+            browser.submit_address_input(":separate").status,
+            TabActionStatus::Applied
+        );
+        assert_eq!(browser.active_pages().len(), 1);
     }
 
     #[test]
@@ -2251,6 +2558,7 @@ mod tests {
             browser.context_actions(tab_id),
             vec![
                 TabActionKind::ReturnToPinned,
+                TabActionKind::SplitRight,
                 TabActionKind::Promote,
                 TabActionKind::TogglePin,
                 TabActionKind::Close,
@@ -2389,5 +2697,182 @@ mod tests {
                 .active_page_changed()
         );
         assert_eq!(browser.active_space().id(), work);
+    }
+
+    #[test]
+    fn a_split_presents_two_tabs_while_the_added_tab_has_focus() {
+        let mut browser = BrowserState::with_initial_url("left.example");
+        let left = browser.active_tab().id;
+        let right = browser.add_tab("right.example");
+
+        assert!(browser.split_tabs(left, right, SplitPane::Right));
+
+        let pages = browser.active_pages();
+        assert_eq!(
+            pages.iter().map(|page| page.tab_id).collect::<Vec<_>>(),
+            vec![left, right]
+        );
+        assert_eq!(browser.active_tab().id, right);
+        assert_eq!(browser.active_split().unwrap().ratio(), 0.5);
+    }
+
+    #[test]
+    fn selecting_a_split_member_restores_the_pair_and_focuses_that_member() {
+        let mut browser = BrowserState::with_initial_url("left.example");
+        let left = browser.active_tab().id;
+        let right = browser.add_tab("right.example");
+        let unrelated = browser.add_tab("unrelated.example");
+        assert!(browser.split_tabs(left, right, SplitPane::Right));
+
+        apply(&mut browser, unrelated, TabActionKind::Select);
+        assert_eq!(browser.active_pages().len(), 1);
+
+        apply(&mut browser, left, TabActionKind::Select);
+        assert_eq!(browser.active_tab().id, left);
+        assert_eq!(
+            browser
+                .active_pages()
+                .iter()
+                .map(|page| page.tab_id)
+                .collect::<Vec<_>>(),
+            vec![left, right]
+        );
+    }
+
+    #[test]
+    fn closing_a_focused_split_pane_leaves_its_partner_presented() {
+        let mut browser = BrowserState::with_initial_url("left.example");
+        let left = browser.active_tab().id;
+        let right = browser.add_tab("right.example");
+        assert!(browser.split_tabs(left, right, SplitPane::Right));
+
+        apply(&mut browser, right, TabActionKind::Close);
+
+        assert_eq!(browser.active_tab().id, left);
+        assert_eq!(browser.active_pages().len(), 1);
+        assert!(browser.active_space().split_for_tab(left).is_none());
+    }
+
+    #[test]
+    fn separating_a_split_keeps_both_tabs_and_the_focused_tab() {
+        let mut browser = BrowserState::with_initial_url("left.example");
+        let left = browser.active_tab().id;
+        let right = browser.add_tab("right.example");
+        assert!(browser.split_tabs(left, right, SplitPane::Right));
+
+        assert!(browser.separate_active_split());
+
+        assert_eq!(browser.tabs().len(), 2);
+        assert_eq!(browser.active_tab().id, right);
+        assert_eq!(browser.active_pages().len(), 1);
+    }
+
+    #[test]
+    fn split_ratio_is_clamped_to_keep_both_panes_usable() {
+        let mut browser = BrowserState::with_initial_url("left.example");
+        let left = browser.active_tab().id;
+        let right = browser.add_tab("right.example");
+        assert!(browser.split_tabs(left, right, SplitPane::Right));
+
+        assert!(browser.resize_active_split(0.01));
+        assert_eq!(browser.active_split().unwrap().ratio(), 0.2);
+        assert!(browser.resize_active_split(0.99));
+        assert_eq!(browser.active_split().unwrap().ratio(), 0.8);
+        assert!(!browser.resize_active_split(f32::NAN));
+        assert_eq!(browser.active_split().unwrap().ratio(), 0.8);
+    }
+
+    #[test]
+    fn a_tab_can_belong_to_only_one_split_pair() {
+        let mut browser = BrowserState::with_initial_url("one.example");
+        let one = browser.active_tab().id;
+        let two = browser.add_tab("two.example");
+        let three = browser.add_tab("three.example");
+        assert!(browser.split_tabs(one, two, SplitPane::Right));
+
+        assert!(browser.split_tabs(two, three, SplitPane::Right));
+
+        assert!(browser.active_space().split_for_tab(one).is_none());
+        let pair = browser.active_space().split_for_tab(two).unwrap();
+        assert_eq!((pair.left(), pair.right()), (two, three));
+    }
+
+    #[test]
+    fn a_space_can_restore_more_than_one_split_pair() {
+        let mut browser = BrowserState::with_initial_url("one.example");
+        let one = browser.active_tab().id;
+        let two = browser.add_tab("two.example");
+        assert!(browser.split_tabs(one, two, SplitPane::Right));
+        let three = browser.add_tab("three.example");
+        let four = browser.add_tab("four.example");
+        assert!(browser.split_tabs(three, four, SplitPane::Right));
+
+        apply(&mut browser, one, TabActionKind::Select);
+        assert_eq!(
+            browser
+                .active_pages()
+                .iter()
+                .map(|page| page.tab_id)
+                .collect::<Vec<_>>(),
+            vec![one, two]
+        );
+
+        apply(&mut browser, four, TabActionKind::Select);
+        assert_eq!(
+            browser
+                .active_pages()
+                .iter()
+                .map(|page| page.tab_id)
+                .collect::<Vec<_>>(),
+            vec![three, four]
+        );
+    }
+
+    #[test]
+    fn loading_repairs_split_ratios_and_discards_overlapping_pairs() {
+        let mut browser = BrowserState::with_initial_url("one.example");
+        let one = browser.active_tab().id;
+        let two = browser.add_tab("two.example");
+        assert!(browser.split_tabs(one, two, SplitPane::Right));
+        let three = browser.add_tab("three.example");
+        let four = browser.add_tab("four.example");
+        assert!(browser.split_tabs(three, four, SplitPane::Right));
+        browser.spaces[0].split_pairs[0].ratio = 4.0;
+        browser.spaces[0].split_pairs[1].left = two;
+
+        browser.repair_after_load();
+
+        apply(&mut browser, one, TabActionKind::Select);
+        assert_eq!(browser.active_split().unwrap().ratio(), 0.8);
+        apply(&mut browser, four, TabActionKind::Select);
+        assert!(browser.active_split().is_none());
+    }
+
+    #[test]
+    fn add_right_split_action_opens_a_new_tab_as_the_right_pane() {
+        let mut browser = BrowserState::with_initial_url("left.example");
+        let left = browser.active_tab().id;
+
+        let outcome = apply_active(&mut browser, TabActionKind::SplitRight);
+
+        assert_eq!(outcome.status, TabActionStatus::Applied);
+        let split = *browser.active_split().unwrap();
+        assert_eq!(split.left(), left);
+        assert_eq!(split.right(), browser.active_tab().id);
+        assert_eq!(browser.active_tab().url, "arc://new-tab");
+    }
+
+    #[test]
+    fn moving_a_split_pane_to_another_space_separates_the_pair() {
+        let mut browser = BrowserState::with_initial_url("left.example");
+        let left = browser.active_tab().id;
+        let right = browser.add_tab("right.example");
+        assert!(browser.split_tabs(left, right, SplitPane::Right));
+        let destination = browser.create_space("Work", SpaceColor::Blue);
+
+        assert!(browser.move_tab_to_space(right, destination));
+
+        assert!(browser.active_space().split_for_tab(left).is_none());
+        assert_eq!(browser.active_tab().id, left);
     }
 }

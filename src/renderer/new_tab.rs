@@ -1,4 +1,7 @@
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 use eframe::egui;
 use skia_safe::{
@@ -6,7 +9,7 @@ use skia_safe::{
 };
 
 use crate::{
-    browser::{BrowserState, TabId},
+    browser::{ActivePage, BrowserState, TabAction, TabActionKind, TabId},
     ds::{components::SearchField, theming::Theme},
 };
 
@@ -15,7 +18,7 @@ use crate::{
 pub struct NewTabScene {
     started_at: Instant,
     last_rendered_at: Option<Instant>,
-    search_input: String,
+    search_inputs: HashMap<(TabId, u64), String>,
     texture: Option<egui::TextureHandle>,
     focused_sessions: HashSet<(TabId, u64)>,
 }
@@ -25,7 +28,7 @@ impl NewTabScene {
         Self {
             started_at: Instant::now(),
             last_rendered_at: None,
-            search_input: String::new(),
+            search_inputs: HashMap::new(),
             texture: None,
             focused_sessions: HashSet::new(),
         }
@@ -35,6 +38,7 @@ impl NewTabScene {
         &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
+        page: &ActivePage,
         browser: &mut BrowserState,
         address_input: &mut String,
         theme: &Theme,
@@ -77,17 +81,26 @@ impl NewTabScene {
 
         // A new tab becomes active as soon as it is created. Request focus once for each tab
         // rather than on every frame, so users can still move focus elsewhere on the page.
-        let active_tab = browser.active_tab();
-        let autofocus = self
-            .focused_sessions
-            .insert((active_tab.id, active_tab.session_revision));
-        let submitted = paint_search(ui, rect, &mut self.search_input, theme, autofocus);
-        if submitted && !self.search_input.trim().is_empty() {
-            let outcome = browser.submit_address_input(&self.search_input);
+        let session = (page.tab_id, page.session_revision);
+        let autofocus =
+            page.tab_id == browser.active_tab().id && self.focused_sessions.insert(session);
+        let submitted = paint_search(
+            ui,
+            rect,
+            self.search_inputs.entry(session).or_default(),
+            theme,
+            autofocus,
+        );
+        let submitted_value = submitted
+            .then(|| self.search_inputs.get(&session).cloned())
+            .flatten();
+        if let Some(value) = submitted_value.filter(|value| !value.trim().is_empty()) {
+            let outcome = browser
+                .apply_tab_action(TabAction::new(page.tab_id, TabActionKind::Navigate(value)));
             if outcome.active_page_changed() {
                 *address_input = browser.active_url_for_input();
             }
-            self.search_input.clear();
+            self.search_inputs.remove(&session);
         }
 
         ui.ctx().request_repaint_after(WIND_TUNNEL_FRAME_INTERVAL);

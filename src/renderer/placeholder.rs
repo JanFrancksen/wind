@@ -1,7 +1,6 @@
 use eframe::egui;
 
 use crate::{
-    browser::BrowserState,
     ds::theming::Theme,
     renderer::{PageTarget, RendererStatus},
 };
@@ -25,8 +24,6 @@ impl PlaceholderRenderer {
 
     pub fn hide(&mut self) {}
 
-    pub fn focus(&mut self) {}
-
     pub fn shutdown(&mut self) {}
 
     pub fn tick(&mut self) {}
@@ -35,7 +32,7 @@ impl PlaceholderRenderer {
 pub fn paint_status(
     ui: &mut egui::Ui,
     rect: egui::Rect,
-    browser: &BrowserState,
+    page_url: &str,
     theme: &Theme,
     status: &RendererStatus,
 ) {
@@ -56,7 +53,7 @@ pub fn paint_status(
                     .size(theme.tokens.primitive.typography.body),
             );
             ui.label(
-                egui::RichText::new(&browser.active_tab().url)
+                egui::RichText::new(page_url)
                     .color(color.text_muted)
                     .size(theme.tokens.primitive.typography.caption),
             );

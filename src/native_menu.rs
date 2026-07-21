@@ -168,8 +168,10 @@ mod platform {
     }
 
     #[cfg(test)]
-    const NATIVE_TAB_ACTIONS: [TabActionKind; 7] = [
+    const NATIVE_TAB_ACTIONS: [TabActionKind; 9] = [
         TabActionKind::ReturnToPinned,
+        TabActionKind::SplitRight,
+        TabActionKind::SeparateSplit,
         TabActionKind::Demote,
         TabActionKind::Promote,
         TabActionKind::TogglePin,
@@ -341,6 +343,8 @@ mod platform {
     fn tab_action_title(tab: &Tab, action: &TabActionKind) -> String {
         match action {
             TabActionKind::ReturnToPinned => "Return to Pinned Tab".to_owned(),
+            TabActionKind::SplitRight => "Add Right Split".to_owned(),
+            TabActionKind::SeparateSplit => "Separate Split Tabs".to_owned(),
             TabActionKind::Demote => "Remove from Highlights".to_owned(),
             TabActionKind::Promote => "Add to Highlights".to_owned(),
             TabActionKind::TogglePin if tab.is_organized() => "Unpin Tab".to_owned(),
@@ -581,6 +585,8 @@ mod platform {
         fn tab_menu_action_tags_round_trip() {
             let actions = [
                 TabActionKind::ReturnToPinned,
+                TabActionKind::SplitRight,
+                TabActionKind::SeparateSplit,
                 TabActionKind::Demote,
                 TabActionKind::Promote,
                 TabActionKind::TogglePin,

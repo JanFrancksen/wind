@@ -1,5 +1,7 @@
 use cef::{CefString, ImplBrowser, ImplBrowserHost, ImplDictionaryValue, dictionary_value_create};
 
+use std::collections::HashSet;
+
 use crate::browser::TabId;
 
 const ENTER_PICTURE_IN_PICTURE: &str = r#"
@@ -119,19 +121,19 @@ impl FloatingVideoCommand {
     }
 }
 
-pub(super) fn commands_for_tab_selection(
-    previous: Option<TabId>,
-    next: TabId,
+pub(super) fn commands_for_presentation_change(
+    previous_focus: Option<TabId>,
+    next_visible: &HashSet<TabId>,
     floating_owner: Option<TabId>,
 ) -> Vec<FloatingVideoCommand> {
-    let Some(previous) = previous.filter(|previous| *previous != next) else {
-        return Vec::new();
-    };
+    let leaving_focus = previous_focus.filter(|tab_id| !next_visible.contains(tab_id));
+    let returning_owner =
+        floating_owner.filter(|owner| leaving_focus.is_some() || next_visible.contains(owner));
 
-    floating_owner
+    returning_owner
         .map(FloatingVideoCommand::Exit)
         .into_iter()
-        .chain(std::iter::once(FloatingVideoCommand::Enter(previous)))
+        .chain(leaving_focus.map(FloatingVideoCommand::Enter))
         .collect()
 }
 
@@ -181,7 +183,11 @@ mod tests {
         let destination = browser.active_page().tab_id;
 
         assert_eq!(
-            commands_for_tab_selection(Some(source), destination, Some(destination)),
+            commands_for_presentation_change(
+                Some(source),
+                &HashSet::from([destination]),
+                Some(destination)
+            ),
             vec![
                 FloatingVideoCommand::Exit(destination),
                 FloatingVideoCommand::Enter(source),
@@ -199,11 +205,27 @@ mod tests {
         let destination = browser.active_page().tab_id;
 
         assert_eq!(
-            commands_for_tab_selection(Some(current), destination, Some(first_source)),
+            commands_for_presentation_change(
+                Some(current),
+                &HashSet::from([destination]),
+                Some(first_source)
+            ),
             vec![
                 FloatingVideoCommand::Exit(first_source),
                 FloatingVideoCommand::Enter(current),
             ]
+        );
+    }
+
+    #[test]
+    fn moving_focus_inside_a_split_does_not_float_the_other_visible_pane() {
+        let mut browser = BrowserState::with_initial_url("youtube.com");
+        let first = browser.active_page().tab_id;
+        let second = browser.add_tab("example.com");
+
+        assert!(
+            commands_for_presentation_change(Some(first), &HashSet::from([first, second]), None,)
+                .is_empty()
         );
     }
 }

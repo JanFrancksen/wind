@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use crate::{
-    browser::{BrowserState, TabAction, TabActionKind},
+    browser::{BrowserState, SplitPane, TabAction, TabActionKind},
     ds::{
         components::{CopyUrlButton, DsButton, Icon, SearchField},
         theming::Theme,
@@ -92,38 +92,69 @@ pub fn show_compact(
 }
 
 fn handle_shortcuts(ui: &mut egui::Ui, browser: &mut BrowserState, address_input: &mut String) {
-    let (new_tab, close_tab, reload, back, forward, reopen_closed, space_index) =
-        ui.input(|input| {
-            let command = input.modifiers.command;
-            let shift = input.modifiers.shift;
-            let number_keys = [
-                egui::Key::Num1,
-                egui::Key::Num2,
-                egui::Key::Num3,
-                egui::Key::Num4,
-                egui::Key::Num5,
-                egui::Key::Num6,
-                egui::Key::Num7,
-                egui::Key::Num8,
-                egui::Key::Num9,
-            ];
+    let (
+        new_tab,
+        close_tab,
+        reload,
+        back,
+        forward,
+        reopen_closed,
+        space_index,
+        add_split,
+        separate_split,
+        split_index,
+    ) = ui.input(|input| {
+        let command = input.modifiers.command;
+        let shift = input.modifiers.shift;
+        let number_keys = [
+            egui::Key::Num1,
+            egui::Key::Num2,
+            egui::Key::Num3,
+            egui::Key::Num4,
+            egui::Key::Num5,
+            egui::Key::Num6,
+            egui::Key::Num7,
+            egui::Key::Num8,
+            egui::Key::Num9,
+        ];
 
-            (
-                command && input.key_pressed(egui::Key::T),
-                command && input.key_pressed(egui::Key::W),
-                command && input.key_pressed(egui::Key::R),
-                command && input.key_pressed(egui::Key::ArrowLeft),
-                command && input.key_pressed(egui::Key::ArrowRight),
-                command && shift && input.key_pressed(egui::Key::T),
-                input
-                    .modifiers
-                    .ctrl
-                    .then(|| number_keys.iter().position(|key| input.key_pressed(*key)))
-                    .flatten(),
-            )
-        });
+        (
+            command && input.key_pressed(egui::Key::T),
+            command && input.key_pressed(egui::Key::W),
+            command && input.key_pressed(egui::Key::R),
+            command && input.key_pressed(egui::Key::ArrowLeft),
+            command && input.key_pressed(egui::Key::ArrowRight),
+            command && shift && input.key_pressed(egui::Key::T),
+            (input.modifiers.ctrl && !shift)
+                .then(|| number_keys.iter().position(|key| input.key_pressed(*key)))
+                .flatten(),
+            input.modifiers.ctrl
+                && shift
+                && (input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals)),
+            input.modifiers.ctrl && shift && input.key_pressed(egui::Key::Minus),
+            (input.modifiers.ctrl && shift)
+                .then(|| {
+                    number_keys[..2]
+                        .iter()
+                        .position(|key| input.key_pressed(*key))
+                })
+                .flatten(),
+        )
+    });
 
-    let outcome = if let Some(index) = space_index {
+    let outcome = if let Some(index) = split_index {
+        let target = SplitPane::from_index(index)
+            .and_then(|pane| browser.active_split().map(|pair| pair.tab(pane)));
+        if let Some(tab_id) = target {
+            let outcome = browser.apply_tab_action(TabAction::new(tab_id, TabActionKind::Select));
+            sync_address_after(outcome, browser, address_input);
+        }
+        return;
+    } else if add_split {
+        apply_to_active(browser, TabActionKind::SplitRight)
+    } else if separate_split {
+        apply_to_active(browser, TabActionKind::SeparateSplit)
+    } else if let Some(index) = space_index {
         if browser.switch_space_by_index(index) {
             *address_input = browser.active_url_for_input();
         }

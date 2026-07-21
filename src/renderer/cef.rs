@@ -16,7 +16,7 @@ use cef::*;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{
-    browser::{Favicon, OpenTab, SpaceId, TabId},
+    browser::{Favicon, OpenTab, SpaceId, SplitPane, TabId},
     persistence::AppPaths,
     renderer::{
         AppShortcut, FaviconUpdate, PageTarget, PageTitleUpdate, PageUrlUpdate, PhysicalRect,
@@ -297,7 +297,9 @@ pub struct CefRenderer {
     events: SharedEventBridge,
     tabs: HashMap<TabId, CefTab>,
     closing_tabs: Vec<CefTab>,
-    active_tab: Option<TabId>,
+    focused_tab: Option<TabId>,
+    presented_tabs: HashSet<TabId>,
+    focus_pending: bool,
     floating_video_owner: Option<TabId>,
     surface_visible: bool,
     request_context_root: PathBuf,
@@ -523,7 +525,9 @@ impl CefRenderer {
             events: Rc::new(CefEventBridge::default()),
             tabs: HashMap::new(),
             closing_tabs: Vec::new(),
-            active_tab: None,
+            focused_tab: None,
+            presented_tabs: HashSet::new(),
+            focus_pending: false,
             floating_video_owner: None,
             surface_visible: true,
             request_context_root,
@@ -543,8 +547,6 @@ impl CefRenderer {
         }) {
             self.close_renderer_tab(target.page.tab_id);
         }
-        self.select_tab(target.page.tab_id);
-
         if !self.tabs.contains_key(&target.page.tab_id) {
             let parent = match native_window_handle(frame) {
                 Some(parent) => parent,
@@ -572,6 +574,7 @@ impl CefRenderer {
     pub fn show(&mut self) {
         self.surface_visible = true;
         self.sync_visibility();
+        self.sync_focus();
     }
 
     pub fn hide(&mut self) {
@@ -579,22 +582,14 @@ impl CefRenderer {
         self.sync_visibility();
     }
 
-    pub fn focus(&mut self) {
-        if let Some(host) = self
-            .active_tab
-            .and_then(|tab_id| self.current_browser(tab_id))
-            .and_then(|browser| browser.host())
-        {
-            host.set_focus(1);
-        }
-    }
-
     pub fn shutdown(&mut self) {
         let tab_ids = self.tabs.keys().copied().collect::<Vec<_>>();
         for tab_id in tab_ids {
             self.close_renderer_tab(tab_id);
         }
-        self.active_tab = None;
+        self.focused_tab = None;
+        self.presented_tabs.clear();
+        self.focus_pending = false;
     }
 
     pub fn flush_session_data(&mut self) {
@@ -701,19 +696,22 @@ impl CefRenderer {
         }
 
         if self
-            .active_tab
+            .focused_tab
             .is_some_and(|tab_id| !self.tabs.contains_key(&tab_id))
         {
-            self.active_tab = None;
+            self.focused_tab = None;
+            self.focus_pending = false;
         }
+        self.presented_tabs
+            .retain(|tab_id| live_tabs.contains(tab_id));
         self.request_contexts
             .retain(|space_id, _| live_spaces.contains(space_id));
     }
 
-    pub fn select_tab(&mut self, tab_id: TabId) {
-        let commands = floating_video::commands_for_tab_selection(
-            self.active_tab,
-            tab_id,
+    pub fn set_presentation(&mut self, presented_tabs: HashSet<TabId>, focused_tab: TabId) {
+        let commands = floating_video::commands_for_presentation_change(
+            self.focused_tab,
+            &presented_tabs,
             self.floating_video_owner,
         );
         let mut next_owner = self.floating_video_owner;
@@ -726,8 +724,16 @@ impl CefRenderer {
         }
         self.floating_video_owner = next_owner;
 
-        if self.active_tab != Some(tab_id) {
-            self.active_tab = Some(tab_id);
+        let focus_changed = self.focused_tab != Some(focused_tab);
+        let focus_became_presented =
+            !self.presented_tabs.contains(&focused_tab) && presented_tabs.contains(&focused_tab);
+        if focus_changed || focus_became_presented {
+            self.focus_pending = true;
+        }
+
+        if focus_changed || self.presented_tabs != presented_tabs {
+            self.focused_tab = Some(focused_tab);
+            self.presented_tabs = presented_tabs;
             self.sync_visibility();
         }
     }
@@ -751,6 +757,11 @@ impl CefRenderer {
         }
         if self.floating_video_owner == Some(tab_id) {
             self.floating_video_owner = None;
+        }
+        self.presented_tabs.remove(&tab_id);
+        if self.focused_tab == Some(tab_id) {
+            self.focused_tab = None;
+            self.focus_pending = false;
         }
         if let Some(host) = browser.and_then(|browser| browser.host()) {
             host.close_browser(1);
@@ -852,7 +863,7 @@ impl CefRenderer {
 
     fn sync_visibility(&self) {
         for (tab_id, tab) in &self.tabs {
-            let visible = should_show_tab(self.surface_visible, self.active_tab, *tab_id);
+            let visible = should_show_tab(self.surface_visible, &self.presented_tabs, *tab_id);
             let browser = {
                 let mut slot = tab.browser.borrow_mut();
                 slot.visible = visible;
@@ -862,6 +873,29 @@ impl CefRenderer {
                 set_child_window_visible(&browser, visible);
             }
         }
+    }
+
+    fn sync_focus(&mut self) {
+        let Some(tab_id) = pending_focus_target(
+            self.surface_visible,
+            self.focus_pending,
+            self.focused_tab,
+            &self.presented_tabs,
+        ) else {
+            if self.surface_visible {
+                self.focus_pending = false;
+            }
+            return;
+        };
+        let Some(host) = self
+            .current_browser(tab_id)
+            .and_then(|browser| browser.host())
+        else {
+            return;
+        };
+
+        host.set_focus(1);
+        self.focus_pending = false;
     }
 
     fn current_browser(&self, tab_id: TabId) -> Option<Browser> {
@@ -923,8 +957,20 @@ fn finish_browser_close(slot: &SharedBrowser) {
     slot.closed = true;
 }
 
-fn should_show_tab(surface_visible: bool, active_tab: Option<TabId>, tab_id: TabId) -> bool {
-    surface_visible && active_tab == Some(tab_id)
+fn should_show_tab(surface_visible: bool, presented_tabs: &HashSet<TabId>, tab_id: TabId) -> bool {
+    surface_visible && presented_tabs.contains(&tab_id)
+}
+
+fn pending_focus_target(
+    surface_visible: bool,
+    focus_pending: bool,
+    focused_tab: Option<TabId>,
+    presented_tabs: &HashSet<TabId>,
+) -> Option<TabId> {
+    (surface_visible && focus_pending)
+        .then_some(focused_tab)
+        .flatten()
+        .filter(|tab_id| presented_tabs.contains(tab_id))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1083,7 +1129,7 @@ wrap_focus_handler! {
         fn on_got_focus(&self, browser: Option<&mut Browser>) {
             confirm_floating_video_return(self.tab_id, browser);
             self.events
-                .request_shortcut(AppShortcut::SelectTab(self.tab_id));
+                .request_shortcut(AppShortcut::FocusTab(self.tab_id));
         }
     }
 }
@@ -1092,7 +1138,7 @@ fn focus_request_shortcut(tab_id: TabId, source: FocusSource) -> Option<AppShort
     // Chromium's PiP back-to-tab control activates the source WebContents. CEF
     // reports that as a system focus request before the embedded child view can
     // receive focus; navigation-origin requests must not switch Wind tabs.
-    (source == FocusSource::SYSTEM).then_some(AppShortcut::SelectTab(tab_id))
+    (source == FocusSource::SYSTEM).then_some(AppShortcut::FocusTab(tab_id))
 }
 
 fn confirm_floating_video_return(tab_id: TabId, browser: Option<&mut Browser>) {
@@ -1439,6 +1485,22 @@ fn app_shortcut(event: &KeyEvent) -> Option<AppShortcut> {
 
     let key = u8::try_from(event.windows_key_code).ok()?;
     let control_flag = cef::sys::cef_event_flags_t::EVENTFLAG_CONTROL_DOWN.0;
+    let shift_flag = cef::sys::cef_event_flags_t::EVENTFLAG_SHIFT_DOWN.0;
+    let alt_flag = cef::sys::cef_event_flags_t::EVENTFLAG_ALT_DOWN.0;
+    if is_key_down
+        && event.modifiers & control_flag != 0
+        && event.modifiers & shift_flag != 0
+        && event.modifiers & alt_flag == 0
+    {
+        return match key {
+            b'+' | b'=' | 187 => Some(AppShortcut::AddRightSplit),
+            b'-' | 189 => Some(AppShortcut::SeparateSplit),
+            b'1' | b'2' => {
+                SplitPane::from_index((key - b'1') as usize).map(AppShortcut::FocusSplitPane)
+            }
+            _ => None,
+        };
+    }
     if is_key_down
         && event.modifiers & control_flag != 0
         && event.modifiers & excluded_modifiers == 0
@@ -1544,7 +1606,7 @@ mod tests {
 
         assert_eq!(
             focus_request_shortcut(tab_id, FocusSource::SYSTEM),
-            Some(AppShortcut::SelectTab(tab_id))
+            Some(AppShortcut::FocusTab(tab_id))
         );
         assert_eq!(
             focus_request_shortcut(tab_id, FocusSource::NAVIGATION),
@@ -1590,6 +1652,25 @@ mod tests {
         };
 
         assert_eq!(app_shortcut(&event), Some(AppShortcut::SwitchSpace(1)));
+    }
+
+    #[test]
+    fn control_shift_split_shortcuts_are_routed_from_the_focused_browser() {
+        let modifiers = cef::sys::cef_event_flags_t::EVENTFLAG_CONTROL_DOWN.0
+            | cef::sys::cef_event_flags_t::EVENTFLAG_SHIFT_DOWN.0;
+        let event = |key| KeyEvent {
+            type_: KeyEventType::RAWKEYDOWN,
+            modifiers,
+            windows_key_code: i32::from(key),
+            ..Default::default()
+        };
+
+        assert_eq!(app_shortcut(&event(b'=')), Some(AppShortcut::AddRightSplit));
+        assert_eq!(app_shortcut(&event(b'-')), Some(AppShortcut::SeparateSplit));
+        assert_eq!(
+            app_shortcut(&event(b'2')),
+            Some(AppShortcut::FocusSplitPane(SplitPane::Right))
+        );
     }
 
     #[test]
@@ -1704,15 +1785,40 @@ mod tests {
     }
 
     #[test]
-    fn only_the_active_tab_is_visible_in_the_native_surface() {
+    fn every_presented_tab_is_visible_in_the_native_surface() {
         let mut tabs = BrowserState::with_initial_url("example.com");
         let first = tabs.active_page().tab_id;
         tabs.add_tab("rust-lang.org");
         let second = tabs.active_page().tab_id;
+        let presented = HashSet::from([first, second]);
 
-        assert!(should_show_tab(true, Some(second), second));
-        assert!(!should_show_tab(true, Some(second), first));
-        assert!(!should_show_tab(false, Some(second), second));
+        assert!(should_show_tab(true, &presented, second));
+        assert!(should_show_tab(true, &presented, first));
+        assert!(!should_show_tab(false, &presented, second));
+    }
+
+    #[test]
+    fn native_focus_transfer_waits_for_a_visible_presented_browser() {
+        let tabs = BrowserState::with_initial_url("example.com");
+        let focused = tabs.active_page().tab_id;
+        let presented = HashSet::from([focused]);
+
+        assert_eq!(
+            pending_focus_target(true, true, Some(focused), &presented),
+            Some(focused)
+        );
+        assert_eq!(
+            pending_focus_target(false, true, Some(focused), &presented),
+            None
+        );
+        assert_eq!(
+            pending_focus_target(true, false, Some(focused), &presented),
+            None
+        );
+        assert_eq!(
+            pending_focus_target(true, true, Some(focused), &HashSet::new()),
+            None
+        );
     }
 
     #[test]

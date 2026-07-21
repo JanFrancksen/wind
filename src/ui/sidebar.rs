@@ -1,7 +1,10 @@
 use eframe::egui;
 
 use crate::{
-    browser::{BrowserState, SpaceColor, SpaceId, Tab, TabAction, TabActionKind, TabGroup, TabId},
+    browser::{
+        BrowserState, SpaceColor, SpaceId, SplitPane, Tab, TabAction, TabActionKind, TabGroup,
+        TabId,
+    },
     ds::{
         components::{DsButton, Icon, TabButton, divider},
         theming::Theme,
@@ -22,9 +25,15 @@ struct DraggedTab {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct DropTarget {
-    group: TabGroup,
-    index: usize,
+enum DropTarget {
+    Place { group: TabGroup, index: usize },
+    Split { anchor: TabId, pane: SplitPane },
+}
+
+#[derive(Clone, Copy)]
+struct TabSelection {
+    selected: bool,
+    focused: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -183,13 +192,17 @@ fn tabs_panel(
         if ui.input(|input| input.pointer.any_released()) {
             if let Some(target) = drop_target {
                 let _ = egui::DragAndDrop::take_payload::<DraggedTab>(ui.ctx());
-                actions.push(TabAction::new(
-                    dragged.id,
-                    TabActionKind::Place {
-                        group: target.group,
-                        index: target.index,
-                    },
-                ));
+                match target {
+                    DropTarget::Place { group, index } => actions.push(TabAction::new(
+                        dragged.id,
+                        TabActionKind::Place { group, index },
+                    )),
+                    DropTarget::Split { anchor, pane } => {
+                        if browser.split_tabs(anchor, dragged.id, pane) {
+                            *address_input = browser.active_url_for_input();
+                        }
+                    }
+                }
             }
         } else {
             floating_drag_preview(ui, browser, dragged, drop_target, theme);
@@ -828,7 +841,7 @@ fn highlighted_pinned_tabs(
             })
     });
     if let Some(index) = hovered_index {
-        *drop_target = Some(DropTarget {
+        *drop_target = Some(DropTarget::Place {
             group: TabGroup::Highlight,
             index,
         });
@@ -867,9 +880,15 @@ fn highlighted_pinned_tabs(
                 .max_rect(rect)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
-        let is_active = browser.tabs()[browser.active_index()].id == tab.id;
+        let selection = TabSelection {
+            selected: browser
+                .active_split()
+                .is_some_and(|pair| pair.contains(tab.id))
+                || browser.tabs()[browser.active_index()].id == tab.id,
+            focused: browser.active_tab().id == tab.id,
+        };
         let (response, return_clicked, close_clicked) =
-            highlighted_pin_tile(&mut tile_ui, tab, is_active, rect.width(), theme);
+            highlighted_pin_tile(&mut tile_ui, tab, selection, rect.width(), theme);
         response.dnd_set_drag_payload(DraggedTab { id: tab.id });
 
         let available_actions = browser.context_actions(tab.id);
@@ -890,30 +909,42 @@ fn highlighted_pinned_tabs(
 fn highlighted_pin_tile(
     ui: &mut egui::Ui,
     tab: &Tab,
-    selected: bool,
+    selection: TabSelection,
     size: f32,
     theme: &Theme,
 ) -> (egui::Response, bool, bool) {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click_and_drag());
     let color = &theme.tokens.semantic.color;
-    let fill = if selected {
+    let fill = if selection.selected {
         color.surface_active
     } else if response.hovered() {
         color.tile_hover
     } else {
         color.tile
     };
-    let stroke_color = if selected { color.focus } else { color.border };
+    let stroke = if selection.focused {
+        egui::Stroke::new(theme.tokens.primitive.stroke.thin, color.focus)
+    } else {
+        egui::Stroke::new(theme.tokens.primitive.stroke.hairline, color.border)
+    };
 
     ui.painter()
         .rect_filled(rect, theme.tokens.primitive.radius.lg, fill);
     ui.painter().rect_stroke(
         rect,
         theme.tokens.primitive.radius.lg,
-        egui::Stroke::new(theme.tokens.primitive.stroke.hairline, stroke_color),
+        stroke,
         egui::StrokeKind::Inside,
     );
+    if selection.focused {
+        let marker = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 2.0, rect.center().y),
+            egui::vec2(4.0, (rect.height() * 0.3).max(12.0)),
+        );
+        ui.painter()
+            .rect_filled(marker, theme.tokens.primitive.radius.round, color.focus);
+    }
     if let Some(texture) = favicon_texture(ui, tab) {
         let image_size = (size * 0.5).clamp(20.0, 36.0);
         let image_rect = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(image_size));
@@ -1009,6 +1040,8 @@ fn tab_context_menu(
 fn tab_action_presentation(tab: &Tab, kind: &TabActionKind) -> (String, Icon) {
     match kind {
         TabActionKind::ReturnToPinned => ("Return to pinned tab".to_owned(), Icon::ArrowLeft),
+        TabActionKind::SplitRight => ("Add right split".to_owned(), Icon::Plus),
+        TabActionKind::SeparateSplit => ("Separate split tabs".to_owned(), Icon::X),
         TabActionKind::Demote => ("Demote from highlight".to_owned(), Icon::ChevronDown),
         TabActionKind::Promote => ("Promote to highlight".to_owned(), Icon::ChevronUp),
         TabActionKind::TogglePin if tab.is_organized() => ("Unpin tab".to_owned(), Icon::Pin),
@@ -1252,21 +1285,39 @@ fn tab_row_group(
         accept_rows as f32 * row_height + accept_rows.saturating_sub(1) as f32 * spacing;
     let accept_rect = egui::Rect::from_min_size(top_left, egui::vec2(row_width, accept_height));
 
-    let hovered_index = dragging.and_then(|_| {
+    let split_target = dragging.and_then(|_| {
+        let pointer = ui.ctx().pointer_interact_pos()?;
+        let (index, side) = row_split_intent(
+            pointer,
+            top_left,
+            row_width,
+            row_height,
+            spacing,
+            tabs.len(),
+        )?;
+        Some((tabs[index].id, side))
+    });
+    let hovered_index = dragging.filter(|_| split_target.is_none()).and_then(|_| {
         let pointer = ui.ctx().pointer_interact_pos()?;
         accept_rect
             .contains(pointer)
             .then(|| row_insertion_index(pointer.y, top_left.y, row_height, spacing, tabs.len()))
     });
-    if let Some(index) = hovered_index {
-        *drop_target = Some(DropTarget { group, index });
+    if let Some((anchor, pane)) = split_target {
+        *drop_target = Some(DropTarget::Split { anchor, pane });
+    } else if let Some(index) = hovered_index {
+        *drop_target = Some(DropTarget::Place { group, index });
     }
 
     let source_placeholder =
         dragging.and_then(|dragged| group_index(browser.tabs(), dragged.id, group));
-    let placeholder = hovered_index
-        .or(source_placeholder)
-        .or_else(|| (dragging.is_some() && tabs.is_empty()).then_some(0));
+    let placeholder = if split_target.is_some() {
+        None
+    } else {
+        hovered_index
+            .or(source_placeholder)
+            .or_else(|| (dragging.is_some() && tabs.is_empty()).then_some(0))
+    };
     let mut slots = tabs.drain(..).map(Some).collect::<Vec<_>>();
     if let Some(index) = placeholder {
         slots.insert(index.min(slots.len()), None);
@@ -1296,11 +1347,20 @@ fn tab_row_group(
             ui,
             rect,
             tab,
-            browser.active_tab().id == tab.id,
+            TabSelection {
+                selected: browser
+                    .active_split()
+                    .is_some_and(|pair| pair.contains(tab.id))
+                    || browser.active_tab().id == tab.id,
+                focused: browser.active_tab().id == tab.id,
+            },
             browser.context_actions(tab.id),
             theme,
             actions,
         );
+        if let Some((_, pane)) = split_target.filter(|(anchor, _)| *anchor == tab.id) {
+            paint_split_drop_target(ui, rect, pane, theme);
+        }
     }
 }
 
@@ -1308,7 +1368,7 @@ fn paint_tab_row_at(
     ui: &mut egui::Ui,
     row_rect: egui::Rect,
     tab: &Tab,
-    is_active: bool,
+    selection: TabSelection,
     available_actions: Vec<TabActionKind>,
     theme: &Theme,
     actions: &mut Vec<TabAction>,
@@ -1341,10 +1401,21 @@ fn paint_tab_row_at(
 
         let tab_response = TabButton::new(&tab.title)
             .favicon(favicon.as_ref())
-            .selected(is_active)
+            .selected(selection.selected)
             .close_visible(tab.is_open() && row_hovered)
             .width(tab_width)
             .show(&mut row_ui, theme);
+        if selection.focused {
+            let marker = egui::Rect::from_center_size(
+                egui::pos2(tab_response.rect.left() + 1.5, tab_response.rect.center().y),
+                egui::vec2(3.0, (tab_response.rect.height() * 0.48).max(8.0)),
+            );
+            ui.painter().rect_filled(
+                marker,
+                theme.tokens.primitive.radius.round,
+                theme.tokens.semantic.color.focus,
+            );
+        }
         tab_response.dnd_set_drag_payload(DraggedTab { id: tab.id });
         if let Some(kind) = tab_action_for_pointer(
             &tab_response,
@@ -1424,6 +1495,57 @@ fn row_insertion_index(
     (0..item_count)
         .position(|index| pointer_y < top + index as f32 * step + row_height * 0.5)
         .unwrap_or(item_count)
+}
+
+fn row_split_intent(
+    pointer: egui::Pos2,
+    origin: egui::Pos2,
+    row_width: f32,
+    row_height: f32,
+    spacing: f32,
+    item_count: usize,
+) -> Option<(usize, SplitPane)> {
+    if pointer.x < origin.x || pointer.x > origin.x + row_width || pointer.y < origin.y {
+        return None;
+    }
+    let step = row_height + spacing;
+    let index = ((pointer.y - origin.y) / step).floor() as usize;
+    if index >= item_count {
+        return None;
+    }
+    let row_top = origin.y + index as f32 * step;
+    let row_progress = (pointer.y - row_top) / row_height;
+    if !(0.2..=0.8).contains(&row_progress) {
+        return None;
+    }
+    let pane = if pointer.x < origin.x + row_width * 0.5 {
+        SplitPane::Left
+    } else {
+        SplitPane::Right
+    };
+    Some((index, pane))
+}
+
+fn paint_split_drop_target(ui: &egui::Ui, rect: egui::Rect, pane: SplitPane, theme: &Theme) {
+    let half = match pane {
+        SplitPane::Left => {
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.center().x, rect.bottom()))
+        }
+        SplitPane::Right => {
+            egui::Rect::from_min_max(egui::pos2(rect.center().x, rect.top()), rect.max)
+        }
+    };
+    ui.painter().rect_filled(
+        half.shrink(1.0),
+        theme.tokens.component.tab.radius,
+        theme.tokens.semantic.color.focus.gamma_multiply(0.28),
+    );
+    ui.painter().rect_stroke(
+        half.shrink(1.0),
+        theme.tokens.component.tab.radius,
+        egui::Stroke::new(1.5, theme.tokens.semantic.color.focus),
+        egui::StrokeKind::Inside,
+    );
 }
 
 fn grid_insertion_index(
@@ -1536,7 +1658,17 @@ fn floating_drag_preview(
     let Some(tab) = browser.tabs().iter().find(|tab| tab.id == dragged.id) else {
         return;
     };
-    let group = target.map_or_else(|| tab.group(), |target| target.group);
+    let group = target.map_or_else(
+        || tab.group(),
+        |target| match target {
+            DropTarget::Place { group, .. } => group,
+            DropTarget::Split { anchor, .. } => browser
+                .tabs()
+                .iter()
+                .find(|tab| tab.id == anchor)
+                .map_or(tab.group(), Tab::group),
+        },
+    );
     let spacing = theme.tokens.primitive.space.sm;
     let tile_size = ((ui.available_width() - spacing * (HIGHLIGHT_COLUMNS - 1) as f32)
         / HIGHLIGHT_COLUMNS as f32)
@@ -1638,11 +1770,11 @@ fn section_label(ui: &mut egui::Ui, label: &str, theme: &Theme) {
 mod tests {
     use eframe::egui;
 
-    use crate::browser::{BrowserState, Favicon, SpaceId};
+    use crate::browser::{BrowserState, Favicon, SpaceId, SplitPane};
 
     use super::{
         grid_insertion_index, has_modal_open, normalized_favicon_image, row_insertion_index,
-        space_offsets, tab_action_for_button,
+        row_split_intent, space_offsets, tab_action_for_button,
     };
 
     #[test]
@@ -1666,6 +1798,24 @@ mod tests {
         assert_eq!(
             tab_action_for_button(egui::PointerButton::Primary, true),
             Some(crate::browser::TabActionKind::Select)
+        );
+    }
+
+    #[test]
+    fn dropping_on_a_tab_rows_center_chooses_its_left_or_right_split() {
+        let origin = egui::pos2(20.0, 40.0);
+
+        assert_eq!(
+            row_split_intent(egui::pos2(60.0, 56.0), origin, 200.0, 40.0, 4.0, 2),
+            Some((0, SplitPane::Left))
+        );
+        assert_eq!(
+            row_split_intent(egui::pos2(180.0, 100.0), origin, 200.0, 40.0, 4.0, 2),
+            Some((1, SplitPane::Right))
+        );
+        assert_eq!(
+            row_split_intent(egui::pos2(60.0, 42.0), origin, 200.0, 40.0, 4.0, 2),
+            None
         );
     }
 

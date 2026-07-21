@@ -60,6 +60,6 @@ On macOS also expose the framework libraries:
 export DYLD_FALLBACK_LIBRARY_PATH="$DYLD_FALLBACK_LIBRARY_PATH:$CEF_PATH:$CEF_PATH/Chromium Embedded Framework.framework/Libraries"
 ```
 
-The renderer owns a native Chromium child view for each live HTTP tab and presents only the Active Tab. Tab selection, navigation, and reload are expressed as a `PageTarget` containing the Space and Tab identities, URL, render revision, and physical bounds. Title, URL, and favicon callbacks flow back through the renderer boundary; downloads, popup routing, and additional platform polish can remain behind the same boundary.
+The renderer owns a native Chromium child view for each live HTTP tab and presents every Visible Tab in the Active View. The presented-tab set is independent from the focused Active Tab, allowing both panes of a Split View to remain visible while focus moves between them. Each visible page is expressed as a `PageTarget` containing the Space and Tab identities, URL, render revision, and physical bounds. Title, URL, and favicon callbacks flow back through the renderer boundary; downloads, popup routing, and additional platform polish can remain behind the same boundary.
 
 Each Wind Space owns a persistent CEF request context rooted below Wind's application-data directory. Every tab created in a Space uses that context, so cookies and HTML5 storage survive restarts within the Space while remaining isolated from other Spaces. Inactive Space views remain alive but hidden until their tabs are closed, moved, or the Space is deleted.

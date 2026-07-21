@@ -7,13 +7,13 @@ mod cef;
 #[cfg(feature = "cef-renderer")]
 mod floating_video;
 
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use std::{collections::HashSet, path::PathBuf};
 
 use eframe::egui;
 
 use crate::{
-    browser::{ActivePage, BrowserState, Favicon, TabId},
+    browser::{ActivePage, BrowserState, Favicon, SplitPane, TabId},
     ds::theming::Theme,
 };
 
@@ -27,11 +27,15 @@ pub enum RendererStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "cef-renderer"), allow(dead_code))]
 pub enum AppShortcut {
     ToggleSidebar,
     NewTab,
+    AddRightSplit,
+    SeparateSplit,
+    FocusSplitPane(SplitPane),
     OpenUrlInNewTab(String),
-    SelectTab(TabId),
+    FocusTab(TabId),
     SwitchSpace(usize),
 }
 
@@ -108,7 +112,7 @@ pub struct RendererShutdownOutcome {
 enum RendererBackend {
     Placeholder(placeholder::PlaceholderRenderer),
     #[cfg(feature = "cef-renderer")]
-    Cef(cef::CefRenderer),
+    Cef(Box<cef::CefRenderer>),
 }
 
 impl BrowserRenderer {
@@ -119,46 +123,63 @@ impl BrowserRenderer {
         }
     }
 
-    pub fn show_in_rect(
+    #[allow(clippy::too_many_arguments)]
+    pub fn show_panes(
         &mut self,
         ui: &mut egui::Ui,
         frame: &mut eframe::Frame,
         browser: &mut BrowserState,
         address_input: &mut String,
         theme: &Theme,
-        rect: egui::Rect,
+        pane_rects: &[egui::Rect],
         chrome_modal_open: bool,
     ) {
         self.backend.set_repaint_context(ui.ctx());
         self.backend.sync_tabs(browser.open_tabs());
-        self.backend.select_tab(browser.active_tab().id);
-        let response = ui.interact(
-            rect,
-            egui::Id::new("wind_browser_surface"),
-            egui::Sense::click(),
-        );
-        if browser.active_tab().url == "arc://new-tab" {
-            self.backend.hide();
-            self.new_tab.paint(ui, rect, browser, address_input, theme);
-            return;
-        }
-
-        let page = browser.active_page();
-        let target = PageTarget::new(page, rect, ui.ctx().pixels_per_point());
-        let status = self.backend.render(frame, &target);
-
-        if response.clicked() {
-            self.backend.focus();
-        }
-
         let popup_open = egui::Popup::is_any_open(ui.ctx()) || chrome_modal_open;
-        if should_show_native_surface(&status, popup_open) {
-            self.backend.show();
-        } else {
-            self.backend.hide();
-            if !matches!(status, RendererStatus::Ready) {
-                placeholder::paint_status(ui, rect, browser, theme, &status);
+        let focused_tab = browser.active_tab().id;
+        let pages = browser.active_pages();
+        let mut native_tabs = HashSet::new();
+
+        for (page, pane_rect) in pages.into_iter().zip(pane_rects.iter().copied()) {
+            let focused = page.tab_id == focused_tab;
+            paint_pane_frame(ui, pane_rect, focused, theme);
+            let page_rect = pane_rect.shrink(2.0);
+            let response = ui.interact(
+                page_rect,
+                egui::Id::new(("wind_browser_surface", page.tab_id)),
+                egui::Sense::click(),
+            );
+            if response.clicked() && page.tab_id != browser.active_tab().id {
+                let outcome = browser.apply_tab_action(crate::browser::TabAction::new(
+                    page.tab_id,
+                    crate::browser::TabActionKind::Select,
+                ));
+                if outcome.active_page_changed() {
+                    *address_input = browser.active_url_for_input();
+                }
             }
+
+            if page.url == "arc://new-tab" {
+                self.new_tab
+                    .paint(ui, page_rect, &page, browser, address_input, theme);
+                continue;
+            }
+
+            let target = PageTarget::new(page.clone(), page_rect, ui.ctx().pixels_per_point());
+            let status = self.backend.render(frame, &target);
+            if matches!(status, RendererStatus::Ready) {
+                native_tabs.insert(page.tab_id);
+            } else {
+                placeholder::paint_status(ui, page_rect, &page.url, theme, &status);
+            }
+        }
+
+        self.backend.set_presentation(native_tabs, focused_tab);
+        if popup_open {
+            self.backend.hide();
+        } else {
+            self.backend.show();
         }
     }
 
@@ -220,10 +241,6 @@ impl BrowserRenderer {
     }
 }
 
-fn should_show_native_surface(status: &RendererStatus, popup_open: bool) -> bool {
-    matches!(status, RendererStatus::Ready) && !popup_open
-}
-
 impl Default for BrowserRenderer {
     fn default() -> Self {
         Self::new(
@@ -238,7 +255,7 @@ impl RendererBackend {
         #[cfg(feature = "cef-renderer")]
         {
             if _cef_available {
-                return Self::Cef(cef::CefRenderer::new(_request_context_root));
+                return Self::Cef(Box::new(cef::CefRenderer::new(_request_context_root)));
             }
         }
 
@@ -293,17 +310,21 @@ impl RendererBackend {
         }
     }
 
-    fn sync_tabs(&mut self, tab_ids: impl IntoIterator<Item = crate::browser::OpenTab>) {
+    fn sync_tabs(&mut self, _tabs: impl IntoIterator<Item = crate::browser::OpenTab>) {
         #[cfg(feature = "cef-renderer")]
         if let Self::Cef(renderer) = self {
-            renderer.sync_tabs(tab_ids);
+            renderer.sync_tabs(_tabs);
         }
     }
 
-    fn select_tab(&mut self, _tab_id: crate::browser::TabId) {
+    fn set_presentation(
+        &mut self,
+        _presented_tabs: HashSet<crate::browser::TabId>,
+        _focused_tab: crate::browser::TabId,
+    ) {
         #[cfg(feature = "cef-renderer")]
         if let Self::Cef(renderer) = self {
-            renderer.select_tab(_tab_id);
+            renderer.set_presentation(_presented_tabs, _focused_tab);
         }
     }
 
@@ -320,14 +341,6 @@ impl RendererBackend {
             Self::Placeholder(renderer) => renderer.hide(),
             #[cfg(feature = "cef-renderer")]
             Self::Cef(renderer) => renderer.hide(),
-        }
-    }
-
-    fn focus(&mut self) {
-        match self {
-            Self::Placeholder(renderer) => renderer.focus(),
-            #[cfg(feature = "cef-renderer")]
-            Self::Cef(renderer) => renderer.focus(),
         }
     }
 
@@ -387,6 +400,27 @@ impl RendererBackend {
     }
 }
 
+fn paint_pane_frame(ui: &egui::Ui, rect: egui::Rect, focused: bool, theme: &Theme) {
+    ui.painter().rect_filled(
+        rect,
+        theme.tokens.primitive.radius.md,
+        theme.tokens.semantic.color.chrome,
+    );
+    ui.painter().rect_stroke(
+        rect.shrink(0.5),
+        theme.tokens.primitive.radius.md,
+        egui::Stroke::new(
+            if focused { 2.0 } else { 1.0 },
+            if focused {
+                theme.tokens.semantic.color.focus
+            } else {
+                theme.tokens.semantic.color.border
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+}
+
 #[derive(Debug)]
 struct FaviconUpdate {
     tab_id: crate::browser::TabId,
@@ -396,14 +430,3 @@ struct FaviconUpdate {
 
 #[cfg(feature = "cef-renderer")]
 pub use cef::{CefRuntime, CefRuntimeError};
-
-#[cfg(test)]
-mod tests {
-    use super::{RendererStatus, should_show_native_surface};
-
-    #[test]
-    fn native_surface_yields_to_egui_popups() {
-        assert!(!should_show_native_surface(&RendererStatus::Ready, true));
-        assert!(should_show_native_surface(&RendererStatus::Ready, false));
-    }
-}

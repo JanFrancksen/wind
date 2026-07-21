@@ -248,7 +248,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{AppPaths, AppStateStore, ChromeState, PersistedAppState};
-    use crate::browser::{BrowserState, Favicon, SpaceColor, TabAction, TabActionKind, TabGroup};
+    use crate::browser::{
+        BrowserState, Favicon, SpaceColor, SplitPane, TabAction, TabActionKind, TabGroup,
+    };
     use crate::ds::theming::ThemeAppearance;
 
     #[test]
@@ -374,6 +376,29 @@ mod tests {
         assert_eq!(pinned.group(), TabGroup::Pinned);
         assert!(pinned.is_open());
         assert_eq!(pinned.favicon, Some(favicon));
+    }
+
+    #[test]
+    fn split_pairs_and_their_ratio_are_available_after_a_restart() {
+        let directory = tempdir().unwrap();
+        let store = AppStateStore::new(AppPaths::from_data_dir(directory.path().to_owned()));
+        let mut browser = BrowserState::with_initial_url("left.example");
+        let left = browser.active_tab().id;
+        let right = browser.add_tab("right.example");
+        assert!(browser.split_tabs(left, right, SplitPane::Right));
+        assert!(browser.resize_active_split(0.64));
+
+        store
+            .save(&PersistedAppState {
+                browser,
+                chrome: ChromeState::default(),
+            })
+            .unwrap();
+        let restored = store.load().unwrap();
+
+        let split = restored.browser.active_split().unwrap();
+        assert_eq!((split.left(), split.right()), (left, right));
+        assert!((split.ratio() - 0.64).abs() < f32::EPSILON);
     }
 
     #[test]

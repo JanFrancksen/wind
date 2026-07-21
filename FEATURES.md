@@ -29,6 +29,7 @@ This file tracks the next browser features after the design-system and shell-lay
 
 ## Browser Surface
 
+- [x] Add persistent, resizable side-by-side Split Views with pane focus and close controls.
 - Build a proper new-tab page.
 - Add loading and error states.
 - Add a web renderer boundary that can be backed by Wry, CEF, or another renderer.
