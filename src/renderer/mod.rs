@@ -157,8 +157,7 @@ impl BrowserRenderer {
         let mut native_tabs = HashSet::new();
 
         for (page, pane_rect) in pages.into_iter().zip(pane_rects.iter().copied()) {
-            let focused = page.tab_id == focused_tab;
-            paint_pane_frame(ui, pane_rect, focused, theme);
+            paint_pane_frame(ui, pane_rect, theme);
             let page_rect = pane_rect.shrink(2.0);
             let response = ui.interact(
                 page_rect,
@@ -428,20 +427,13 @@ fn renderer_is_ready(status: &RendererStatus) -> bool {
     }
 }
 
-fn paint_pane_frame(ui: &egui::Ui, rect: egui::Rect, focused: bool, theme: &Theme) {
+fn paint_pane_frame(ui: &egui::Ui, rect: egui::Rect, theme: &Theme) {
     ui.painter()
         .rect_filled(rect, 0, theme.tokens.semantic.color.chrome);
     ui.painter().rect_stroke(
         rect.shrink(0.5),
         0,
-        egui::Stroke::new(
-            if focused { 2.0 } else { 1.0 },
-            if focused {
-                theme.tokens.semantic.color.focus
-            } else {
-                theme.tokens.semantic.color.border
-            },
-        ),
+        egui::Stroke::new(1.0, theme.tokens.semantic.color.border),
         egui::StrokeKind::Inside,
     );
 }

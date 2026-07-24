@@ -1520,95 +1520,93 @@ fn paint_tab_row_at(
     theme: &Theme,
     actions: &mut Vec<TabAction>,
 ) {
-    ui.push_id(("tab-row", tab.id), |ui| {
-        let favicon = favicon_texture(ui, tab);
-        let action_size = theme
-            .tokens
-            .component
-            .tab
-            .close_size
-            .max(theme.tokens.component.button.height_sm);
-        let spacing = theme.tokens.primitive.space.xs;
-        let is_away_from_pin = tab.is_away_from_pinned();
-        let actions_width = if is_away_from_pin {
-            action_size + spacing
-        } else {
-            0.0
-        };
-        let tab_width = (row_rect.width() - actions_width).max(0.0);
-        let row_hovered = ui.rect_contains_pointer(row_rect);
-        let mut row_ui = ui.new_child(
+    let favicon = favicon_texture(ui, tab);
+    let action_size = theme
+        .tokens
+        .component
+        .tab
+        .close_size
+        .max(theme.tokens.component.button.height_sm);
+    let spacing = theme.tokens.primitive.space.xs;
+    let is_away_from_pin = tab.is_away_from_pinned();
+    let actions_width = if is_away_from_pin {
+        action_size + spacing
+    } else {
+        0.0
+    };
+    let tab_width = (row_rect.width() - actions_width).max(0.0);
+    let row_hovered = ui.rect_contains_pointer(row_rect);
+    let mut row_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("tab-content", tab.id))
+            .max_rect(row_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    row_ui.set_clip_rect(row_rect);
+    row_ui.spacing_mut().item_spacing.x = spacing;
+
+    let tab_response = TabButton::new(&tab.title)
+        .favicon(favicon.as_ref())
+        .selected(selection.selected)
+        .close_visible(tab.is_open() && row_hovered)
+        .width(tab_width)
+        .show(&mut row_ui, theme);
+    if selection.focused {
+        let marker = egui::Rect::from_center_size(
+            egui::pos2(tab_response.rect.left() + 1.5, tab_response.rect.center().y),
+            egui::vec2(3.0, (tab_response.rect.height() * 0.48).max(8.0)),
+        );
+        ui.painter().rect_filled(
+            marker,
+            theme.tokens.primitive.radius.round,
+            theme.tokens.semantic.color.focus,
+        );
+    }
+    tab_response.dnd_set_drag_payload(DraggedTab { id: tab.id });
+    if let Some(kind) = tab_action_for_pointer(
+        &tab_response,
+        available_actions.contains(&TabActionKind::Close),
+    ) {
+        actions.push(TabAction::new(tab.id, kind));
+    }
+
+    attach_tab_context_menu(&tab_response, tab, available_actions, actions, theme);
+
+    if is_away_from_pin
+        && DsButton::icon(Icon::ArrowLeft)
+            .ghost()
+            .small()
+            .width(action_size)
+            .show(&mut row_ui, theme)
+            .on_hover_text("Return to pinned tab")
+            .clicked()
+    {
+        actions.push(TabAction::new(tab.id, TabActionKind::ReturnToPinned));
+    }
+    if tab.is_open() && row_hovered {
+        let close_rect = egui::Rect::from_center_size(
+            egui::pos2(
+                tab_response.rect.right() - spacing - action_size * 0.5,
+                tab_response.rect.center().y,
+            ),
+            egui::Vec2::splat(action_size),
+        );
+        let mut close_ui = row_ui.new_child(
             egui::UiBuilder::new()
-                .id_salt(("tab-content", tab.id))
-                .max_rect(row_rect)
+                .id_salt(("close-tab", tab.id))
+                .max_rect(close_rect)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        row_ui.set_clip_rect(row_rect);
-        row_ui.spacing_mut().item_spacing.x = spacing;
-
-        let tab_response = TabButton::new(&tab.title)
-            .favicon(favicon.as_ref())
-            .selected(selection.selected)
-            .close_visible(tab.is_open() && row_hovered)
-            .width(tab_width)
-            .show(&mut row_ui, theme);
-        if selection.focused {
-            let marker = egui::Rect::from_center_size(
-                egui::pos2(tab_response.rect.left() + 1.5, tab_response.rect.center().y),
-                egui::vec2(3.0, (tab_response.rect.height() * 0.48).max(8.0)),
-            );
-            ui.painter().rect_filled(
-                marker,
-                theme.tokens.primitive.radius.round,
-                theme.tokens.semantic.color.focus,
-            );
+        let close_response = DsButton::icon(Icon::X)
+            .ghost()
+            .small()
+            .width(action_size)
+            .show(&mut close_ui, theme)
+            .on_hover_text("Close tab");
+        if close_control_clicked(&close_response) {
+            actions.push(TabAction::new(tab.id, TabActionKind::Close));
         }
-        tab_response.dnd_set_drag_payload(DraggedTab { id: tab.id });
-        if let Some(kind) = tab_action_for_pointer(
-            &tab_response,
-            available_actions.contains(&TabActionKind::Close),
-        ) {
-            actions.push(TabAction::new(tab.id, kind));
-        }
-
-        attach_tab_context_menu(&tab_response, tab, available_actions, actions, theme);
-
-        if is_away_from_pin
-            && DsButton::icon(Icon::ArrowLeft)
-                .ghost()
-                .small()
-                .width(action_size)
-                .show(&mut row_ui, theme)
-                .on_hover_text("Return to pinned tab")
-                .clicked()
-        {
-            actions.push(TabAction::new(tab.id, TabActionKind::ReturnToPinned));
-        }
-        if tab.is_open() && row_hovered {
-            let close_rect = egui::Rect::from_center_size(
-                egui::pos2(
-                    tab_response.rect.right() - spacing - action_size * 0.5,
-                    tab_response.rect.center().y,
-                ),
-                egui::Vec2::splat(action_size),
-            );
-            let mut close_ui = row_ui.new_child(
-                egui::UiBuilder::new()
-                    .id_salt(("close-tab", tab.id))
-                    .max_rect(close_rect)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            );
-            let close_response = DsButton::icon(Icon::X)
-                .ghost()
-                .small()
-                .width(action_size)
-                .show(&mut close_ui, theme)
-                .on_hover_text("Close tab");
-            if close_control_clicked(&close_response) {
-                actions.push(TabAction::new(tab.id, TabActionKind::Close));
-            }
-        }
-    });
+    }
 }
 
 fn apply_tab_actions(
@@ -1918,12 +1916,65 @@ mod tests {
     use eframe::egui;
 
     use crate::browser::{BrowserState, Favicon, SpaceId, SplitPane};
+    use crate::ds::{
+        components::{DsButton, Icon},
+        theming::{Theme, ThemeAppearance},
+    };
 
     use super::{
         grid_insertion_index, has_modal_open, normalized_favicon_image, row_insertion_index,
         row_split_intent, sidebar_row_tab_rects, sidebar_tab_rows, space_offsets,
-        tab_action_for_button,
+        tab_action_for_button, tab_sections,
     };
+
+    fn new_tab_button_top(tab_count: usize) -> (f32, Theme) {
+        let context = egui::Context::default();
+        let theme = Theme::wind(ThemeAppearance::Alpine);
+        theme.apply(&context);
+        let mut browser = BrowserState::with_initial_url("first.example");
+        for index in 1..tab_count {
+            browser.add_tab(&format!("tab-{index}.example"));
+        }
+        let mut button_top = None;
+
+        let _ = context.run_ui(egui::RawInput::default(), |ui| {
+            let mut drop_target = None;
+            let mut actions = Vec::new();
+            tab_sections(
+                ui,
+                &browser,
+                &theme,
+                None,
+                &mut drop_target,
+                &mut actions,
+                false,
+            );
+            button_top = Some(
+                DsButton::new("New Tab")
+                    .leading_icon(Icon::Plus)
+                    .ghost()
+                    .width(ui.available_width())
+                    .show(ui, &theme)
+                    .rect
+                    .top(),
+            );
+        });
+
+        (
+            button_top.expect("New Tab button should be rendered"),
+            theme,
+        )
+    }
+
+    #[test]
+    fn new_tab_button_gap_does_not_grow_with_each_today_tab() {
+        let (one_tab_top, theme) = new_tab_button_top(1);
+        let (six_tabs_top, _) = new_tab_button_top(6);
+        let intended_added_height =
+            5.0 * (theme.tokens.component.tab.height + theme.tokens.primitive.space.xs);
+
+        assert_eq!(six_tabs_top - one_tab_top, intended_added_height);
+    }
 
     #[test]
     fn middle_click_closes_a_closeable_tab() {

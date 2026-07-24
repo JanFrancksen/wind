@@ -1115,6 +1115,10 @@ wrap_client! {
             ))
         }
 
+        fn jsdialog_handler(&self) -> Option<JsdialogHandler> {
+            Some(WindJsdialogHandler::new())
+        }
+
         fn load_handler(&self) -> Option<LoadHandler> {
             Some(WindLoadHandler::new(self.tab_id, self.events.clone()))
         }
@@ -1127,6 +1131,104 @@ wrap_client! {
             Some(WindDownloadHandler::new())
         }
     }
+}
+
+wrap_jsdialog_handler! {
+    struct WindJsdialogHandler;
+
+    impl JsdialogHandler {
+        fn on_jsdialog(
+            &self,
+            _browser: Option<&mut Browser>,
+            origin_url: Option<&CefString>,
+            dialog_type: JsdialogType,
+            message_text: Option<&CefString>,
+            _default_prompt_text: Option<&CefString>,
+            callback: Option<&mut JsdialogCallback>,
+            _suppress_message: Option<&mut std::os::raw::c_int>,
+        ) -> std::os::raw::c_int {
+            let Some(content) = calendar_notification_content(
+                origin_url.map(CefString::to_string).as_deref().unwrap_or_default(),
+                dialog_type,
+                message_text.map(CefString::to_string).as_deref().unwrap_or_default(),
+            ) else {
+                return 0;
+            };
+
+            if !show_calendar_notification(&content) {
+                return 0;
+            }
+
+            // A JavaScript alert blocks its page until the callback completes.
+            // The system notification replaces that acknowledgement and keeps
+            // the calendar usable while Wind is in the background.
+            if let Some(callback) = callback {
+                callback.cont(1, None);
+            }
+            1
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CalendarNotificationContent {
+    title: &'static str,
+    subtitle: &'static str,
+    body: String,
+}
+
+fn calendar_notification_content(
+    origin_url: &str,
+    dialog_type: JsdialogType,
+    message: &str,
+) -> Option<CalendarNotificationContent> {
+    let host = url::Url::parse(origin_url)
+        .ok()?
+        .host_str()?
+        .to_ascii_lowercase();
+    if dialog_type != JsdialogType::ALERT || host != "calendar.google.com" {
+        return None;
+    }
+
+    let body = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if body.is_empty() {
+        return None;
+    }
+
+    Some(CalendarNotificationContent {
+        title: "Calendar reminder",
+        subtitle: "Google Calendar",
+        body,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn show_calendar_notification(content: &CalendarNotificationContent) -> bool {
+    static NOTIFICATION_PERMISSION: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let permission_granted = *NOTIFICATION_PERMISSION.get_or_init(|| {
+        mac_usernotifications::blocking::request_auth()
+            .map_err(|error| eprintln!("Failed to request notification permission: {error}"))
+            .unwrap_or(false)
+    });
+    if !permission_granted {
+        return false;
+    }
+
+    mac_usernotifications::Notification::new()
+        .title(content.title)
+        .subtitle(content.subtitle)
+        .message(&content.body)
+        .default_sound()
+        .interruption_level(mac_usernotifications::InterruptionLevel::Active)
+        .send_blocking()
+        .map(|_handle| ())
+        .map_err(|error| eprintln!("Failed to show calendar notification: {error}"))
+        .is_ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_calendar_notification(_content: &CalendarNotificationContent) -> bool {
+    false
 }
 
 wrap_focus_handler! {
@@ -1633,6 +1735,51 @@ fn app_shortcut(event: &KeyEvent) -> Option<AppShortcut> {
 mod tests {
     use super::*;
     use crate::browser::BrowserState;
+
+    #[test]
+    fn google_calendar_alert_becomes_a_clean_notification() {
+        assert_eq!(
+            calendar_notification_content(
+                "https://calendar.google.com/calendar/u/0/r",
+                JsdialogType::ALERT,
+                "Gemeinsames Mittagessen  BigFoo-tis\n(Jan Francksen) beginnt um 12:00.",
+            ),
+            Some(CalendarNotificationContent {
+                title: "Calendar reminder",
+                subtitle: "Google Calendar",
+                body: "Gemeinsames Mittagessen BigFoo-tis (Jan Francksen) beginnt um 12:00."
+                    .to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn only_google_calendar_alerts_are_promoted_to_notifications() {
+        assert!(
+            calendar_notification_content(
+                "https://calendar.google.com",
+                JsdialogType::CONFIRM,
+                "Delete this event?",
+            )
+            .is_none()
+        );
+        assert!(
+            calendar_notification_content(
+                "https://calendar.google.com.example.test",
+                JsdialogType::ALERT,
+                "Not a real calendar reminder",
+            )
+            .is_none()
+        );
+        assert!(
+            calendar_notification_content(
+                "https://calendar.google.com",
+                JsdialogType::ALERT,
+                "   ",
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn process_requirement_metrics_are_disabled_without_losing_other_features() {

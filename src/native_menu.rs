@@ -205,6 +205,48 @@ mod platform {
         }
     }
 
+    fn edit_menu_commands() -> [(&'static str, Sel, &'static str); 4] {
+        [
+            ("Cut", sel!(cut:), "x"),
+            ("Copy", sel!(copy:), "c"),
+            ("Paste", sel!(paste:), "v"),
+            ("Select All", sel!(selectAll:), "a"),
+        ]
+    }
+
+    #[allow(unsafe_code)]
+    fn install_edit_menu(main_menu: &NSMenu, mtm: MainThreadMarker) {
+        let edit_title = NSString::from_str("Edit");
+        if main_menu.itemWithTitle(&edit_title).is_some() {
+            return;
+        }
+
+        let edit_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &edit_title);
+        for (index, (title, selector, key_equivalent)) in
+            edit_menu_commands().into_iter().enumerate()
+        {
+            if index == 3 {
+                edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
+            }
+            // SAFETY: AppKit sends these standard editing selectors to the
+            // focused responder because the menu item has no explicit target.
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(title),
+                    Some(selector),
+                    &NSString::from_str(key_equivalent),
+                )
+            };
+            edit_menu.addItem(&item);
+        }
+
+        // SAFETY: `None` is a valid action selector for a submenu root.
+        let edit_root = unsafe { menu_item(mtm, "Edit", None) };
+        edit_root.setSubmenu(Some(&edit_menu));
+        main_menu.insertItem_atIndex(&edit_root, main_menu.numberOfItems().min(1));
+    }
+
     fn appearance_for_tag(tag: u8) -> Option<ThemeAppearance> {
         let index = usize::from(tag.checked_sub(1)?);
         THEME_CHOICES.get(index).map(|(_, appearance)| *appearance)
@@ -340,6 +382,11 @@ mod platform {
                 main_menu.insertItem_atIndex(&root, 0);
                 menu
             });
+
+        // macOS resolves Command-C/V/X/A through the main menu and the native
+        // responder chain. CEF's child view handles these selectors, preserving
+        // every pasteboard representation, including images.
+        install_edit_menu(&main_menu, mtm);
 
         let theme_title = NSString::from_str("Theme");
         if app_menu.itemWithTitle(&theme_title).is_some() {
@@ -597,16 +644,27 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::{
-            SPACE_MENU_STATE, TAB_MENU_STATE, TabActionKind, lock, menu_location_in_view,
-            tab_action_for_tag, tab_action_tag, take_confirmed_space_deletions,
-            take_space_menu_requests, take_tab_menu_requests,
+            SPACE_MENU_STATE, TAB_MENU_STATE, TabActionKind, edit_menu_commands, lock,
+            menu_location_in_view, tab_action_for_tag, tab_action_tag,
+            take_confirmed_space_deletions, take_space_menu_requests, take_tab_menu_requests,
         };
         use crate::{
             browser::{BrowserState, SpaceColor, TabAction},
             native_menu::{SpaceMenuAction, SpaceMenuActionKind},
         };
+        use objc2::sel;
         use objc2_foundation::NSPoint;
         use std::{panic::AssertUnwindSafe, sync::Mutex};
+
+        #[test]
+        fn edit_menu_routes_clipboard_shortcuts_through_the_responder_chain() {
+            let commands = edit_menu_commands();
+
+            assert!(commands.contains(&("Cut", sel!(cut:), "x")));
+            assert!(commands.contains(&("Copy", sel!(copy:), "c")));
+            assert!(commands.contains(&("Paste", sel!(paste:), "v")));
+            assert!(commands.contains(&("Select All", sel!(selectAll:), "a")));
+        }
 
         #[test]
         fn poisoned_native_menu_state_is_recovered_without_a_second_panic() {
